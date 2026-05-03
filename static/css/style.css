@@ -824,6 +824,16 @@ html {
     color: #ccc;
 }
 
+/* Virtual (untagged) chip — pinned, italic, dashed border so it reads
+   as "this isn't a real tag, it's a filter for files with no tags". */
+.tag-filter-btn.virtual {
+    font-style: italic;
+    border-style: dashed;
+}
+.tag-filter-btn.virtual:hover:not(.include):not(.exclude) {
+    border-color: #777;
+}
+
 .tag-count {
     opacity: 0.6;
     font-size: 10px;

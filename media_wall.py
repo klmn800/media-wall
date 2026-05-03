@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import cv2
 from flask import Flask, jsonify, render_template, request, send_from_directory
-from PIL import Image
+from PIL import Image, ImageOps
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -76,11 +76,13 @@ def get_app_dir() -> Path:
     return Path(__file__).parent
 
 
-def ask_media_directory() -> Optional[str]:
+def ask_media_directory(welcome: bool = True) -> Optional[str]:
     """Show a folder-picker dialog so the user can choose their media folder.
 
-    Used on first launch (or whenever config has no media_directory set)
-    so the user never has to hand-edit config.ini.
+    Args:
+        welcome: When True (first-launch flow), show a welcome messagebox
+            before the picker. When False (mid-session "Change Folder"),
+            skip straight to the picker — the user is already in the app.
 
     Returns:
         The selected folder path, or None if the user cancelled.
@@ -91,18 +93,59 @@ def ask_media_directory() -> Optional[str]:
 
         root = tk.Tk()
         root.withdraw()
+        root.attributes("-topmost", True)
 
-        messagebox.showinfo(
-            "Media Wall",
-            "Welcome to Media Wall!\n\n"
-            "Please select the folder containing your images and videos.",
-        )
+        if welcome:
+            messagebox.showinfo(
+                "Media Wall",
+                "Welcome to Media Wall!\n\n"
+                "Please select the folder containing your images and videos.",
+            )
         folder = filedialog.askdirectory(title="Select Media Folder")
         root.destroy()
         return folder if folder else None
     except Exception as e:
         logger.error(f"Could not open folder picker: {e}")
         return None
+
+
+def ask_media_directory_subprocess() -> Optional[str]:
+    """Run the folder picker in a fresh subprocess.
+
+    Tkinter cannot be called from Flask's worker threads — the request
+    handler hits "main thread is not in main loop". So when the
+    /api/pick-folder endpoint needs the picker, we spawn a child process
+    that re-runs this script with --pick-folder, which exits early after
+    showing the dialog and printing the chosen path on stdout.
+
+    Returns:
+        The selected folder path, or None if cancelled or on error.
+    """
+    import subprocess
+
+    if getattr(sys, "frozen", False):
+        # Frozen exe: relaunch the same exe with the hidden flag.
+        cmd = [sys.executable, "--pick-folder"]
+    else:
+        # Dev mode: relaunch via the python interpreter + this script.
+        cmd = [sys.executable, os.path.abspath(__file__), "--pick-folder"]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Folder picker timed out after 10 minutes.")
+        return None
+    except Exception as e:
+        logger.error(f"Folder picker subprocess failed: {e}")
+        return None
+
+    path = result.stdout.strip()
+    return path or None
 
 
 def save_config(config_path: str, config: configparser.ConfigParser) -> None:
@@ -151,6 +194,11 @@ EXCLUDED_DIRS = {".trash", ".posters", ".optimized"}
 METADATA_FILENAME = "media_wall_meta.json"
 OPTIMIZED_MAX_WIDTH = 1200
 OPTIMIZED_QUALITY = 85
+
+# Sentinel value used as a "virtual tag" matching items that have no tags.
+# Surfaced to the frontend as a pinned (untagged) filter chip so flat folders
+# without any tags can still be included/excluded from the grid.
+UNTAGGED_SENTINEL = "__untagged__"
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +323,11 @@ def generate_optimized_image(image_path: str, optimized_dir: str) -> Optional[st
 
     try:
         with Image.open(image_path) as img:
+            # Bake EXIF orientation into the pixels so the saved JPEG
+            # displays upright. Without this, phone photos relying on the
+            # EXIF Orientation tag appear rotated in the grid.
+            img = ImageOps.exif_transpose(img)
+
             # Convert to RGB if needed (e.g., RGBA PNGs — shouldn't happen
             # with JPEGs but defensive)
             if img.mode != "RGB":
@@ -446,11 +499,13 @@ def perform_scan(media_dir: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Flask app factory
 # ---------------------------------------------------------------------------
-def create_app(config: configparser.ConfigParser) -> Flask:
+def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flask:
     """Create and configure the Flask application.
 
     Args:
         config: Application configuration.
+        config_path: Path to the config.ini file. Stored on the app so the
+            /api/set-media-dir endpoint can persist a new directory choice.
 
     Returns:
         Configured Flask app instance.
@@ -462,14 +517,19 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         static_folder=str(bundle_dir / "static"),
     )
     app.config["MEDIA_CONFIG"] = config
+    app.config["CONFIG_PATH"] = config_path
 
-    # Store media directory path for easy access
-    media_dir = config.get("media", "media_directory")
-    app.config["MEDIA_DIR"] = media_dir
+    # Store media directory path. Held in app.config so the directory can
+    # be swapped at runtime via /api/set-media-dir without restarting.
+    app.config["MEDIA_DIR"] = config.get("media", "media_directory")
+
+    def _media_dir() -> str:
+        """Return the current media directory (mutable via /api/set-media-dir)."""
+        return app.config["MEDIA_DIR"]
 
     # Run initial scan on startup
     logger.info("Running initial media scan...")
-    perform_scan(media_dir)
+    perform_scan(_media_dir())
 
     # -----------------------------------------------------------------------
     # Routes — Pages
@@ -498,7 +558,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         Args:
             filepath: Relative path within the media directory.
         """
-        return send_from_directory(media_dir, filepath)
+        return send_from_directory(_media_dir(), filepath)
 
     @app.route("/media/optimized/<path:filename>")
     def serve_optimized(filename: str):
@@ -507,7 +567,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         Args:
             filename: Filename within the .optimized/ cache directory.
         """
-        optimized_dir = os.path.join(media_dir, ".optimized")
+        optimized_dir = os.path.join(_media_dir(), ".optimized")
         return send_from_directory(optimized_dir, filename)
 
     @app.route("/media/poster/<path:filename>")
@@ -517,7 +577,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         Args:
             filename: Filename within the .posters/ cache directory.
         """
-        posters_dir = os.path.join(media_dir, ".posters")
+        posters_dir = os.path.join(_media_dir(), ".posters")
         return send_from_directory(posters_dir, filename)
 
     # -----------------------------------------------------------------------
@@ -542,7 +602,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
             JSON with keys: items (list), page, per_page, total_items,
             total_pages, has_more.
         """
-        metadata = load_metadata(media_dir)
+        metadata = load_metadata(_media_dir())
         items_dict = metadata.get("items", {})
 
         # Build list of items with their relative paths as IDs
@@ -582,13 +642,26 @@ def create_app(config: configparser.ConfigParser) -> Flask:
 
         filter_tags = request.args.get("filter_tags", "")
         if filter_tags:
-            tag_set = {t.strip() for t in filter_tags.split(",") if t.strip()}
-            items = [i for i in items if tag_set <= set(i["tags"])]
+            raw = {t.strip() for t in filter_tags.split(",") if t.strip()}
+            include_untagged = UNTAGGED_SENTINEL in raw
+            real_tags = raw - {UNTAGGED_SENTINEL}
+            if include_untagged and real_tags:
+                # Contradictory: an untagged item can't also have a real tag.
+                items = []
+            elif include_untagged:
+                items = [i for i in items if not i["tags"]]
+            else:
+                items = [i for i in items if real_tags <= set(i["tags"])]
 
         exclude_tags = request.args.get("exclude_tags", "")
         if exclude_tags:
-            exclude_set = {t.strip() for t in exclude_tags.split(",") if t.strip()}
-            items = [i for i in items if not (exclude_set & set(i["tags"]))]
+            raw = {t.strip() for t in exclude_tags.split(",") if t.strip()}
+            exclude_untagged = UNTAGGED_SENTINEL in raw
+            real_excludes = raw - {UNTAGGED_SENTINEL}
+            if exclude_untagged:
+                items = [i for i in items if i["tags"]]
+            if real_excludes:
+                items = [i for i in items if not (real_excludes & set(i["tags"]))]
 
         search = request.args.get("search", "").strip().lower()
         if search:
@@ -637,7 +710,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         Returns:
             JSON with scan results: total_items, new_items, removed_items.
         """
-        result = perform_scan(media_dir)
+        result = perform_scan(_media_dir())
         return jsonify(result)
 
     @app.route("/api/tags", methods=["GET"])
@@ -647,15 +720,27 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         Returns:
             JSON with key 'tags': list of {name, count} dicts, sorted by name.
         """
-        metadata = load_metadata(media_dir)
+        metadata = load_metadata(_media_dir())
         tag_counts: dict[str, int] = {}
+        untagged_count = 0
         for data in metadata["items"].values():
-            for tag in data.get("tags", []):
+            item_tags = data.get("tags", [])
+            if not item_tags:
+                untagged_count += 1
+            for tag in item_tags:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
         tags = [{"name": name, "count": count}
                 for name, count in sorted(tag_counts.items())]
-        return jsonify({"tags": tags})
+        # Pin a virtual (untagged) entry at the top when there are any
+        # untagged items, so users in flat folders have a visibility lever.
+        if untagged_count > 0:
+            tags.insert(0, {
+                "name": UNTAGGED_SENTINEL,
+                "count": untagged_count,
+                "virtual": True,
+            })
+        return jsonify({"tags": tags, "untagged_sentinel": UNTAGGED_SENTINEL})
 
     @app.route("/api/tags", methods=["POST"])
     def api_tags_add():
@@ -677,7 +762,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         if not item_ids or not new_tags:
             return jsonify({"error": "item_ids and tags required"}), 400
 
-        metadata = load_metadata(media_dir)
+        metadata = load_metadata(_media_dir())
         updated = 0
         for item_id in item_ids:
             if item_id in metadata["items"]:
@@ -686,7 +771,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
                 metadata["items"][item_id]["tags"] = sorted(existing)
                 updated += 1
 
-        save_metadata(media_dir, metadata)
+        save_metadata(_media_dir(), metadata)
         return jsonify({"updated": updated})
 
     @app.route("/api/tags", methods=["DELETE"])
@@ -709,7 +794,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         if not item_ids or not remove_tags:
             return jsonify({"error": "item_ids and tags required"}), 400
 
-        metadata = load_metadata(media_dir)
+        metadata = load_metadata(_media_dir())
         updated = 0
         for item_id in item_ids:
             if item_id in metadata["items"]:
@@ -719,7 +804,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
                 )
                 updated += 1
 
-        save_metadata(media_dir, metadata)
+        save_metadata(_media_dir(), metadata)
         return jsonify({"updated": updated})
 
     @app.route("/api/tags/<tag_name>", methods=["DELETE"])
@@ -735,7 +820,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         Returns:
             JSON with 'tag' (name removed) and 'updated' (count of items affected).
         """
-        metadata = load_metadata(media_dir)
+        metadata = load_metadata(_media_dir())
         updated = 0
 
         for item_data in metadata["items"].values():
@@ -745,7 +830,7 @@ def create_app(config: configparser.ConfigParser) -> Flask:
                 item_data["tags"] = sorted(tags)
                 updated += 1
 
-        save_metadata(media_dir, metadata)
+        save_metadata(_media_dir(), metadata)
         logger.info(f"Global tag removal: '{tag_name}' removed from {updated} items")
         return jsonify({"tag": tag_name, "updated": updated})
 
@@ -767,15 +852,15 @@ def create_app(config: configparser.ConfigParser) -> Flask:
         if not item_ids:
             return jsonify({"error": "item_ids required"}), 400
 
-        trash_dir = os.path.join(media_dir, ".trash")
+        trash_dir = os.path.join(_media_dir(), ".trash")
         os.makedirs(trash_dir, exist_ok=True)
 
-        metadata = load_metadata(media_dir)
+        metadata = load_metadata(_media_dir())
         deleted = 0
         errors = []
 
         for item_id in item_ids:
-            src_path = os.path.join(media_dir, item_id)
+            src_path = os.path.join(_media_dir(), item_id)
             if not os.path.exists(src_path):
                 errors.append(f"File not found: {item_id}")
                 continue
@@ -803,8 +888,64 @@ def create_app(config: configparser.ConfigParser) -> Flask:
                 errors.append(f"Failed to delete {item_id}: {e}")
                 logger.error(f"Delete failed for {item_id}: {e}")
 
-        save_metadata(media_dir, metadata)
+        save_metadata(_media_dir(), metadata)
         return jsonify({"deleted": deleted, "errors": errors})
+
+    # -----------------------------------------------------------------------
+    # Routes — Media directory switching
+    # -----------------------------------------------------------------------
+    @app.route("/api/pick-folder", methods=["POST"])
+    def api_pick_folder():
+        """Pop up a native OS folder picker and return the chosen path.
+
+        The picker runs in a fresh subprocess (not on the Flask worker
+        thread that handled this request), because tkinter cannot be
+        invoked from non-main threads — it hits "main thread is not in
+        main loop" otherwise. Since Media Wall's "server" is the user's
+        own machine, the dialog still appears on their screen as a
+        normal native window.
+
+        Returns:
+            JSON {"path": "..."} on success, {"path": None} if cancelled.
+        """
+        picked = ask_media_directory_subprocess()
+        return jsonify({"path": picked})
+
+    @app.route("/api/set-media-dir", methods=["POST"])
+    def api_set_media_dir():
+        """Switch the active media directory at runtime.
+
+        Validates the path, updates app.config, persists to config.ini,
+        and runs a fresh scan so the new directory is ready to serve.
+
+        Request body (JSON):
+            path (str): Absolute path to the new media directory.
+
+        Returns:
+            JSON {"ok": True, "path": "...", "scan": {...}} on success,
+            or {"error": "..."} with a 400 status on failure.
+        """
+        body = request.get_json() or {}
+        new_path = (body.get("path") or "").strip()
+        if not new_path:
+            return jsonify({"error": "path required"}), 400
+        if not os.path.isdir(new_path):
+            return jsonify({"error": f"Not a directory: {new_path}"}), 400
+
+        new_path = os.path.normpath(new_path)
+        app.config["MEDIA_DIR"] = new_path
+        config.set("media", "media_directory", new_path)
+
+        config_path = app.config.get("CONFIG_PATH", "")
+        if config_path:
+            try:
+                save_config(config_path, config)
+            except Exception as e:
+                logger.warning(f"Could not persist new media_directory: {e}")
+
+        logger.info(f"Media directory switched to: {new_path}")
+        scan_result = perform_scan(new_path)
+        return jsonify({"ok": True, "path": new_path, "scan": scan_result})
 
     return app
 
@@ -847,12 +988,29 @@ def parse_args() -> argparse.Namespace:
         default="config.ini",
         help="Path to config file (default: config.ini in media_wall directory)",
     )
+    # Internal flag — used by /api/pick-folder to relaunch this script in a
+    # fresh subprocess that ONLY shows the folder picker, then exits. This
+    # sidesteps tkinter's "main thread is not in main loop" error when the
+    # picker would otherwise be invoked from a Flask worker thread.
+    parser.add_argument(
+        "--pick-folder",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Main entry point — load config, validate, and start the server."""
     args = parse_args()
+
+    # Subprocess folder-picker mode — show the dialog and exit. Used by
+    # /api/pick-folder to keep tkinter off Flask's worker threads.
+    if args.pick_folder:
+        path = ask_media_directory(welcome=False)
+        if path:
+            print(path)
+        sys.exit(0)
 
     # Resolve config path relative to the app directory (next to the .exe
     # when frozen, next to media_wall.py when running from source)
@@ -897,7 +1055,7 @@ def main() -> None:
 
     # Create Flask app
     port = config.getint("server", "port")
-    app = create_app(config)
+    app = create_app(config, config_path)
 
     # Auto-open browser
     if not args.no_browser:

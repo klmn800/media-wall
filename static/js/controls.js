@@ -30,6 +30,9 @@ const Controls = {
     /** All available tags (fetched from API) */
     availableTags: [],
 
+    /** Sentinel value for the virtual (untagged) filter chip; set by /api/tags */
+    untaggedSentinel: "__untagged__",
+
     /** Currently selected include filter tags */
     activeFilterTags: new Set(),
 
@@ -140,6 +143,9 @@ const Controls = {
                 <button id="select-mode-btn" class="panel-action-btn">
                     Select Mode
                 </button>
+                <button id="change-folder-btn" class="panel-action-btn secondary">
+                    Change Folder...
+                </button>
                 <button id="refresh-btn" class="panel-action-btn secondary">
                     Refresh Library
                 </button>
@@ -188,6 +194,7 @@ const Controls = {
             this._updateSelectModeBtn();
         });
         document.getElementById("refresh-btn").addEventListener("click", () => this._onRefresh());
+        document.getElementById("change-folder-btn").addEventListener("click", () => this._onChangeFolder());
 
         // Video controls
         document.getElementById("pause-all-btn").addEventListener("click", () => {
@@ -309,6 +316,9 @@ const Controls = {
             const response = await fetch("/api/tags");
             const data = await response.json();
             this.availableTags = data.tags || [];
+            if (data.untagged_sentinel) {
+                this.untaggedSentinel = data.untagged_sentinel;
+            }
             this._renderTagFilters();
         } catch (err) {
             console.error("Failed to load tags:", err);
@@ -323,16 +333,23 @@ const Controls = {
         }
 
         container.innerHTML = this.availableTags.map(tag => {
+            const isVirtual = tag.virtual === true || tag.name === this.untaggedSentinel;
+            const label = isVirtual ? "(untagged)" : tag.name;
             let stateClass = "";
             if (this.activeFilterTags.has(tag.name)) stateClass = "include";
             else if (this.excludeFilterTags.has(tag.name)) stateClass = "exclude";
-            return `<button class="tag-filter-btn ${stateClass}"
+            const virtualClass = isVirtual ? " virtual" : "";
+            // Virtual chips don't get a global-remove (×) button — there's no
+            // "untagged" tag to delete from items.
+            const removeBtn = isVirtual ? "" :
+                `<span class="tag-remove-global" data-tag="${Tags._escapeHtml(tag.name)}"
+                       data-count="${tag.count}" title="Remove tag from all items">&times;</span>`;
+            return `<button class="tag-filter-btn${virtualClass} ${stateClass}"
                          data-tag="${Tags._escapeHtml(tag.name)}"
                          data-count="${tag.count}">
-                    ${Tags._escapeHtml(tag.name)}
+                    ${Tags._escapeHtml(label)}
                     <span class="tag-count">${tag.count}</span>
-                    <span class="tag-remove-global" data-tag="${Tags._escapeHtml(tag.name)}"
-                          data-count="${tag.count}" title="Remove tag from all items">&times;</span>
+                    ${removeBtn}
                 </button>`;
         }).join("");
 
@@ -652,6 +669,82 @@ const Controls = {
             btn.textContent = "Scan failed";
             btn.disabled = false;
             console.error("Scan failed:", err);
+        }
+    },
+
+    /* ------------------------------------------------------------------
+       Change Media Folder
+       ------------------------------------------------------------------ */
+
+    /**
+     * Pop up a native folder picker, switch the active media directory,
+     * and reset the UI to show the new folder's contents.
+     */
+    async _onChangeFolder() {
+        const btn = document.getElementById("change-folder-btn");
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Choose folder...";
+
+        try {
+            const pickResp = await fetch("/api/pick-folder", { method: "POST" });
+            const pickData = await pickResp.json();
+            if (!pickData.path) {
+                // User cancelled
+                btn.textContent = originalText;
+                btn.disabled = false;
+                return;
+            }
+
+            btn.textContent = "Scanning...";
+            const setResp = await fetch("/api/set-media-dir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: pickData.path }),
+            });
+            const setData = await setResp.json();
+            if (!setResp.ok) {
+                btn.textContent = "Failed";
+                console.error("Set media dir failed:", setData.error);
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }, 2000);
+                return;
+            }
+
+            // Reset UI state — filters from the old folder don't apply here
+            this.activeFilterTags.clear();
+            this.excludeFilterTags.clear();
+            Wall.params.filter_tags = "";
+            Wall.params.exclude_tags = "";
+            Wall.params.search = "";
+            const searchInput = document.getElementById("search-input");
+            if (searchInput) searchInput.value = "";
+            if (this.autoscrolling) this.toggleAutoscroll();
+            if (typeof Lightbox !== "undefined" && Lightbox.isOpen) {
+                Lightbox.close();
+            }
+            if (typeof Tags !== "undefined" && Tags.selectMode) {
+                Tags.toggleSelectMode();
+            }
+
+            await this._loadTags();
+            this._updateFilterIndicator();
+            await reloadGrid();
+
+            btn.textContent = `Switched (${setData.scan.total_items} items)`;
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }, 2500);
+        } catch (err) {
+            btn.textContent = "Failed";
+            console.error("Change folder failed:", err);
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }, 2000);
         }
     },
 };
