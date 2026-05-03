@@ -8,19 +8,18 @@ Built as a local-first alternative to cloud photo services — same beautiful vi
 
 ## Key Features
 
-- **Masonry grid layout** — Dense, beautiful wall with minimal gaps. Browser zoom controls density
-- **Video autoplay** — Videos play silently as you scroll, pause and unload when off-screen to free memory
-- **Configurable video delay** — Set a delay before videos begin playing (0s to 3s)
-- **Global video pause** — Freeze all grid videos with one button or keystroke
-- **Click-to-isolate lightbox** — Full-res images and videos with controls, sound, and loop toggle
-- **Tagging system** — Tag items for grouping and filtering. Hover to see, click to edit in lightbox
-- **Tag include/exclude filtering** — Include tags (blue) to show only matching items, exclude tags (red) to hide them
-- **Bulk operations** — Select Mode for multi-select tagging and deleting
-- **Sorting & filtering** — Sort by date/name/size/type, filter by tag or media type, search by filename
-- **Autoscroll** — Hands-free gallery mode with real-time adjustable speed
-- **Soft delete** — Trashed files move to `.trash/`, recoverable by moving them back
-- **Dark theme** — Media-focused design, minimal chrome, everything gets out of the way
-- **Infinite scroll** — Items load in paginated batches for performance with large collections
+- **Masonry grid layout** — Dense, beautiful wall with minimal gaps. Configurable column and gap width.
+- **Video autoplay** — Videos play silently as you scroll, pause and unload when off-screen to free memory.
+- **Configurable video delay** — Set a delay before videos begin playing (0s to 3s).
+- **Global video pause** — Freeze all grid videos with one button or keystroke.
+- **Click-to-isolate lightbox** — Full-res images and videos with controls, sound, and loop toggle.
+- **Tagging system** — Tag items for grouping and filtering. Hover to see, click to edit in lightbox.
+- **Tag include/exclude filtering** — Include tags (blue) to show only matching items, exclude tags (red) to hide them.
+- **Bulk operations** — Select Mode for multi-select tagging and deleting.
+- **Sorting & filtering** — Sort by date/name/size/type, filter by tag or media type, search by filename.
+- **Autoscroll** — Hands-free gallery mode with real-time adjustable speed.
+- **Soft delete** — Trashed files move to `.trash/`, recoverable by moving them back.
+- **Dark theme** — Media-focused design, minimal chrome, everything gets out of the way.
 
 ## Installation
 
