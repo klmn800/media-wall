@@ -1,0 +1,23 @@
+# Generated/cached media
+.trash/
+.posters/
+.optimized/
+
+# Metadata
+media_wall_meta.json
+
+# Configuration with user paths
+config.ini
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Logs
+*.log

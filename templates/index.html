@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Wall</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <!-- Configuration passed from Flask -->
+    <script>
+        const CONFIG = {
+            columnWidth: {{ config.column_width }},
+            gridGap: {{ config.grid_gap }},
+            autoscrollSpeed: {{ config.autoscroll_speed }},
+            bottomBehavior: "{{ config.bottom_behavior }}",
+            batchSize: {{ config.batch_size }}
+        };
+    </script>
+
+    <!-- Main grid container -->
+    <div id="media-grid" class="media-grid"></div>
+
+    <!-- Sentinel for infinite scroll -->
+    <div id="scroll-sentinel" class="scroll-sentinel"></div>
+
+    <!-- Loading indicator -->
+    <div id="loading-indicator" class="loading-indicator" style="display: none;">
+        Loading...
+    </div>
+
+    <!-- Scripts -->
+    <script src="{{ url_for('static', filename='js/wall.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/video.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/lightbox.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/autocomplete.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/tags.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/controls.js') }}"></script>
+</body>
+</html>
