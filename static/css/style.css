@@ -107,21 +107,6 @@ html {
 }
 
 /* =========================================================================
-   Empty State
-   ========================================================================= */
-
-.empty-state {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 60vh;
-    color: #555;
-    font-size: 16px;
-    text-align: center;
-    padding: 40px;
-}
-
-/* =========================================================================
    Lightbox
    ========================================================================= */
 
@@ -914,6 +899,7 @@ html {
     justify-content: center;
     align-items: center;
     min-height: 60vh;
+    padding: 40px;
     color: #555;
     font-size: 16px;
     text-align: center;

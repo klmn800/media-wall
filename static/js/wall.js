@@ -205,16 +205,32 @@ async function reloadGrid() {
 
 /**
  * Show a placeholder message when no include tags are selected.
+ *
+ * If the only filter available is the (untagged) virtual chip — i.e. the
+ * folder has no real tags yet — the message points the user at it
+ * directly, since "click a tag" would otherwise be confusing advice.
  */
 function showPlaceholder() {
     const grid = document.getElementById("media-grid");
+    const tags = (typeof Controls !== "undefined" ? Controls.availableTags : []) || [];
+    const sentinel = (typeof Controls !== "undefined" ? Controls.untaggedSentinel : "__untagged__");
+    const onlyUntagged = tags.length === 1 && tags[0].name === sentinel;
+    const noTags = tags.length === 0;
+
+    let message;
+    if (onlyUntagged) {
+        message = `Open the Controls panel (F) and click <strong>(untagged)</strong> to show everything in this folder.`;
+    } else if (noTags) {
+        message = `No tagged items yet. Refresh the library or add tags to get started.`;
+    } else {
+        message = `Open the Controls panel (F) and click a tag to filter, or click <strong>(untagged)</strong> to show files without any tags.`;
+    }
+
     grid.innerHTML = `
         <div class="empty-state">
             <div>
-                <p>No tags selected.</p>
-                <p style="margin-top: 8px; font-size: 13px;">
-                    Open the Controls panel (F) and click a tag to get started.
-                </p>
+                <p>Nothing to show yet.</p>
+                <p style="margin-top: 8px; font-size: 13px;">${message}</p>
             </div>
         </div>
     `;

@@ -1,0 +1,28 @@
+; Media Wall configuration — copy to config.ini and edit.
+; First-launch will pop up a folder picker if media_directory is blank.
+
+[server]
+; Local port the Flask server binds to.
+port = 5000
+
+[media]
+; Absolute path to the folder containing your images and videos.
+; On Windows, forward slashes work fine (e.g. C:/Photos/library).
+; Leave blank to be prompted at first launch.
+media_directory =
+
+[grid]
+; Width of each masonry column in pixels. 250 is dense, 500 is roomy.
+column_width = 350
+; Gap between grid items in pixels.
+grid_gap = 2
+
+[autoscroll]
+; Initial autoscroll speed (1-10). Adjustable in real time from the panel.
+speed = 2
+; What happens when autoscroll reaches the bottom: 'loop' or 'stop'.
+bottom_behavior = loop
+
+[pagination]
+; Items fetched per page during infinite scroll.
+batch_size = 50

@@ -559,15 +559,19 @@ const Tags = {
         });
         if (response.ok) {
             const idSet = new Set(itemIds);
-            // Remove from Wall.items
+            // Local removal first for snappy UI
             Wall.items = Wall.items.filter(i => !idSet.has(i.id));
-            // Remove from DOM
             itemIds.forEach(id => {
                 const cell = document.querySelector(
                     `.grid-item[data-item-id="${CSS.escape(id)}"]`
                 );
                 if (cell) cell.remove();
             });
+            // Resync pagination — server-side page boundaries have shifted
+            // by N deleted items, so without this the next infinite-scroll
+            // fetch would skip N items. Reload happens behind the lightbox
+            // when applicable; user only sees the wipe after closing it.
+            await reloadGrid();
         }
     },
 

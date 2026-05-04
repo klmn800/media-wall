@@ -94,7 +94,7 @@ const Controls = {
             </div>
 
             <div class="panel-section">
-                <label class="panel-label">Tags <span class="panel-hint">click: include, double-click: exclude</span></label>
+                <label class="panel-label">Tags <span class="panel-hint">click to cycle: include &rarr; exclude &rarr; off</span></label>
                 <div id="tag-filter-list" class="tag-filter-list">
                     <span class="panel-muted">Loading...</span>
                 </div>
@@ -353,29 +353,12 @@ const Controls = {
                 </button>`;
         }).join("");
 
-        // Click / double-click discrimination for include / exclude
+        // Single click cycles three states: neutral -> include -> exclude -> neutral
         container.querySelectorAll(".tag-filter-btn").forEach(btn => {
-            let clickTimer = null;
-
             btn.addEventListener("click", (e) => {
-                // Ignore clicks on the global-remove x button
                 if (e.target.classList.contains("tag-remove-global")) return;
                 e.preventDefault();
-                if (clickTimer) clearTimeout(clickTimer);
-                clickTimer = setTimeout(() => {
-                    clickTimer = null;
-                    this._handleTagSingleClick(btn);
-                }, 250);
-            });
-
-            btn.addEventListener("dblclick", (e) => {
-                if (e.target.classList.contains("tag-remove-global")) return;
-                e.preventDefault();
-                if (clickTimer) {
-                    clearTimeout(clickTimer);
-                    clickTimer = null;
-                }
-                this._handleTagDoubleClick(btn);
+                this._cycleTagFilter(btn);
             });
         });
 
@@ -385,57 +368,32 @@ const Controls = {
                 e.stopPropagation();
                 e.preventDefault();
                 const tagName = removeBtn.dataset.tag;
-                const count = removeBtn.dataset.count;
+                const count = parseInt(removeBtn.dataset.count, 10) || 0;
                 this._confirmGlobalTagRemoval(tagName, count);
             });
         });
     },
 
     /**
-     * Handle single-click on a tag filter button.
-     * neutral -> include, include -> neutral, exclude -> include
+     * Cycle a tag filter button through three states on each click:
+     * neutral -> include -> exclude -> neutral.
      */
-    _handleTagSingleClick(btn) {
+    _cycleTagFilter(btn) {
         const tagName = btn.dataset.tag;
         if (this.activeFilterTags.has(tagName)) {
-            // include -> neutral
-            this.activeFilterTags.delete(tagName);
-            btn.classList.remove("include");
-        } else if (this.excludeFilterTags.has(tagName)) {
-            // exclude -> include
-            this.excludeFilterTags.delete(tagName);
-            this.activeFilterTags.add(tagName);
-            btn.classList.remove("exclude");
-            btn.classList.add("include");
-        } else {
-            // neutral -> include
-            this.activeFilterTags.add(tagName);
-            btn.classList.add("include");
-        }
-        this._syncTagParams();
-        this._applyFilters();
-    },
-
-    /**
-     * Handle double-click on a tag filter button.
-     * neutral -> exclude, exclude -> neutral, include -> exclude
-     */
-    _handleTagDoubleClick(btn) {
-        const tagName = btn.dataset.tag;
-        if (this.excludeFilterTags.has(tagName)) {
-            // exclude -> neutral
-            this.excludeFilterTags.delete(tagName);
-            btn.classList.remove("exclude");
-        } else if (this.activeFilterTags.has(tagName)) {
             // include -> exclude
             this.activeFilterTags.delete(tagName);
             this.excludeFilterTags.add(tagName);
             btn.classList.remove("include");
             btn.classList.add("exclude");
+        } else if (this.excludeFilterTags.has(tagName)) {
+            // exclude -> neutral
+            this.excludeFilterTags.delete(tagName);
+            btn.classList.remove("exclude");
         } else {
-            // neutral -> exclude
-            this.excludeFilterTags.add(tagName);
-            btn.classList.add("exclude");
+            // neutral -> include
+            this.activeFilterTags.add(tagName);
+            btn.classList.add("include");
         }
         this._syncTagParams();
         this._applyFilters();
@@ -455,7 +413,7 @@ const Controls = {
     async _confirmGlobalTagRemoval(tagName, count) {
         const confirmed = await Tags._confirm(
             "Remove Tag Globally",
-            `Remove tag "${tagName}" from ${count} item${count !== "1" ? "s" : ""}? This cannot be undone.`
+            `Remove tag "${tagName}" from ${count} item${count !== 1 ? "s" : ""}? This cannot be undone.`
         );
         if (!confirmed) return;
 
@@ -609,18 +567,7 @@ const Controls = {
     },
 
     _setupAutoscrollPause() {
-        // Pause autoscroll on any user scroll input
-        let lastScrollTime = 0;
-        const pauseHandler = () => {
-            if (!this.autoscrolling) return;
-            const now = Date.now();
-            if (now - lastScrollTime < 100) {
-                // User is actively scrolling — pause
-                this.toggleAutoscroll();
-            }
-            lastScrollTime = now;
-        };
-
+        // Pause autoscroll on any user scroll input.
         window.addEventListener("wheel", () => {
             if (this.autoscrolling) this.toggleAutoscroll();
         }, { passive: true });

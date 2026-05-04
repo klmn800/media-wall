@@ -120,12 +120,16 @@ Tags are the primary organizational tool. Each item can have multiple tags.
 - **Select Mode** (`S` key) enables multi-select: click items to select them, then use the bulk action bar to tag or delete multiple items at once
 
 ### Tag Filtering (Include & Exclude)
+The wall starts empty by design — pick what you want to look at from the control panel (`F` key) before content loads. This keeps a fresh launch from immediately autoplaying every video in a large library.
+
 In the control panel, each tag has three states — click to cycle through:
 1. **Neutral** (gray) — no effect on filtering
 2. **Include** (blue) — only show items that have this tag
 3. **Exclude** (red, strikethrough) — hide items that have this tag
 
-Multiple tags can be active simultaneously. Include uses OR logic (matches any), exclude removes anything matching.
+Multiple include tags use AND logic — items must have *all* selected include tags to show. Exclude removes anything matching any of the excluded tags.
+
+**`(untagged)` virtual chip:** A pinned italic chip at the top of the tag list matches items that have no tags. Useful for flat folders where nothing has been tagged yet — click it once to show everything in the directory.
 
 ### Sorting & Filtering
 The control panel (`F` key or hamburger icon) provides:
@@ -182,8 +186,11 @@ No frameworks, no build tools. Six JS modules communicate through global objects
 | POST | `/api/scan` | Trigger rescan of media directory |
 | GET | `/api/tags` | List all tags with item counts |
 | POST | `/api/tags` | Add tags to items |
-| DELETE | `/api/tags` | Remove tags from items |
+| DELETE | `/api/tags` | Remove tags from specified items |
+| DELETE | `/api/tags/<tag_name>` | Remove a tag globally from every item |
 | POST | `/api/delete` | Soft-delete items (move to .trash/) |
+| POST | `/api/pick-folder` | Open native folder picker (subprocess) |
+| POST | `/api/set-media-dir` | Switch active media directory at runtime |
 | GET | `/media/original/<path>` | Serve full-resolution file |
 | GET | `/media/optimized/<name>` | Serve optimized grid image |
 | GET | `/media/poster/<name>` | Serve video poster frame |
