@@ -7,6 +7,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   that can wipe every tag. Beat Wall's clip budgeting depends on tags, so this work comes
   first.
 
+## Hard rules
+
+1. **Never test against Ben's real media folder or his `config.ini`.** The app writes into
+   the media folder (`media_wall_meta.json`, caches, `.trash/`), and the folder switcher
+   rewrites `config.ini`. Tests build throwaway libraries in a temp folder and never pass a
+   real config path.
+2. **Never `git add -A` or `git add .`.** Read `git status` and stage files by name. Media
+   files in a test folder must never reach a commit.
+3. Otherwise commit freely: git is Ben's backup. Commit to `main` at every natural checkpoint
+   without asking, tests or no tests, and push after each commit.
+4. `media_wall_meta.json` is read by Beat Wall (`../beat_wall/`). Keep its shape stable:
+   `items` keyed by relative path, `tags` as a list of normalized strings, extra fields kept.
+
 ## What this is
 
 Media Wall is a local Flask app that shows a folder of `.jpg`/`.mp4` files as a masonry wall in
@@ -27,10 +40,12 @@ python media_wall.py --config C:/scratch/test.ini   # scratch config, keeps the 
 build.bat                                 # PyInstaller one-file exe -> dist/media_wall.exe
 ```
 
-There is no test suite, linter, or JS build step. To check a change, run the server against a
-scratch media folder and use the browser. **Never point test runs at Ben's real media folder.**
-The app writes into the media folder (metadata, caches, `.trash/`), and a bad write can wipe
-real tags.
+```bash
+python tests/test_backend.py     # backend checks against throwaway libraries in a temp folder
+```
+
+There is no linter or JS build step. `tests/test_backend.py` is a plain script (no pytest):
+it prints PASS/FAIL per check and exits non-zero on any failure.
 
 ## Architecture
 
