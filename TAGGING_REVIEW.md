@@ -7,6 +7,11 @@ changed yet. Fix item 1 before anything that makes tagging faster.
 
 ## 1. Tags can be wiped out (measured, fix first)
 
+**Fixed 2026-09-26** (commit `7d389f1`): lock, temp-file save with retry, no save over an
+unreadable file, scan merges under the lock. `tests/test_backend.py` repeats the measurement
+below: 200/200 kept at 8 requests at once. The new tags are suggested right away now (part of
+section 2), and so is the lightbox paging limit. The rest of section 2 is still open.
+
 `save_metadata()` truncates `media_wall_meta.json` and rewrites it, with no lock. Flask serves
 requests on several threads at once. `load_metadata()` returns an EMPTY library when it can't
 read the file, and every tag endpoint then saves what it loaded. So if one request reads the

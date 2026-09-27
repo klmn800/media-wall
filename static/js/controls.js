@@ -188,7 +188,6 @@ const Controls = {
         document.getElementById("search-input").addEventListener("input", (e) => this._onSearch(e));
         document.getElementById("search-input").addEventListener("keydown", (e) => e.stopPropagation());
         document.getElementById("autoscroll-toggle").addEventListener("click", () => this.toggleAutoscroll());
-        document.getElementById("autoscroll-speed").addEventListener("input", () => {}); // real-time, read in scroll loop
         document.getElementById("select-mode-btn").addEventListener("click", () => {
             Tags.toggleSelectMode();
         });
@@ -343,12 +342,12 @@ const Controls = {
             // Virtual chips don't get a global-remove (×) button — there's no
             // "untagged" tag to delete from items.
             const removeBtn = isVirtual ? "" :
-                `<span class="tag-remove-global" data-tag="${Tags._escapeHtml(tag.name)}"
+                `<span class="tag-remove-global" data-tag="${escapeHtml(tag.name)}"
                        data-count="${tag.count}" title="Remove tag from all items">&times;</span>`;
             return `<button class="tag-filter-btn${virtualClass} ${stateClass}"
-                         data-tag="${Tags._escapeHtml(tag.name)}"
+                         data-tag="${escapeHtml(tag.name)}"
                          data-count="${tag.count}">
-                    ${Tags._escapeHtml(label)}
+                    ${escapeHtml(label)}
                     <span class="tag-count">${tag.count}</span>
                     ${removeBtn}
                 </button>`;
@@ -459,8 +458,7 @@ const Controls = {
         const bar = document.getElementById("filter-indicator");
         const parts = [];
 
-        const esc = (s) => Tags._escapeHtml(s);
-        const label = (t) => esc(t === this.untaggedSentinel ? "(untagged)" : t);
+        const label = (t) => escapeHtml(t === this.untaggedSentinel ? "(untagged)" : t);
 
         if (Wall.params.filter_type !== "all") {
             parts.push(`Type: ${Wall.params.filter_type}s`);
@@ -472,7 +470,7 @@ const Controls = {
             parts.push(`Exclude: ${Array.from(this.excludeFilterTags).map(label).join(", ")}`);
         }
         if (Wall.params.search) {
-            parts.push(`Search: "${esc(Wall.params.search)}"`);
+            parts.push(`Search: "${escapeHtml(Wall.params.search)}"`);
         }
 
         const grid = document.getElementById("media-grid");
@@ -678,10 +676,10 @@ const Controls = {
             const searchInput = document.getElementById("search-input");
             if (searchInput) searchInput.value = "";
             if (this.autoscrolling) this.toggleAutoscroll();
-            if (typeof Lightbox !== "undefined" && Lightbox.isOpen) {
+            if (Lightbox.isOpen) {
                 Lightbox.close();
             }
-            if (typeof Tags !== "undefined" && Tags.selectMode) {
+            if (Tags.selectMode) {
                 Tags.toggleSelectMode();
             }
 
@@ -715,7 +713,7 @@ document.addEventListener("keydown", (e) => {
     // Don't trigger shortcuts when typing in inputs
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
     // Don't trigger if lightbox is handling keys
-    if (typeof Lightbox !== "undefined" && Lightbox.isOpen) return;
+    if (Lightbox.isOpen) return;
 
     switch (e.key.toLowerCase()) {
         case "f":

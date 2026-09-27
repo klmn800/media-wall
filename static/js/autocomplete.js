@@ -82,7 +82,7 @@ const Autocomplete = {
 
             dropdown.innerHTML = displayItems.map((item, idx) =>
                 `<div class="autocomplete-item${idx === highlightIndex ? " highlighted" : ""}"
-                      data-index="${idx}" data-tag="${escapeAttr(item.name)}">
+                      data-index="${idx}" data-tag="${escapeHtml(item.name)}">
                     ${escapeHtml(item.name)}
                     <span class="autocomplete-count">${item.count}</span>
                 </div>`
@@ -106,16 +106,6 @@ const Autocomplete = {
             dropdown.classList.remove("active");
             highlightIndex = -1;
             onSelect(tagName);
-        }
-
-        function escapeHtml(str) {
-            const div = document.createElement("div");
-            div.textContent = str;
-            return div.innerHTML;
-        }
-
-        function escapeAttr(str) {
-            return str.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
         }
 
         // --- Event handlers ---

@@ -35,7 +35,23 @@ const Wall = {
 
 
 /**
- * Show a short message at the bottom of the screen.
+ * Escape text for use in HTML, including inside quoted attributes.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+
+/**
+ * Show a short message at the top of the screen.
  *
  * Used for anything that failed, so errors aren't silently swallowed.
  *
@@ -147,11 +163,7 @@ function createGridItem(item) {
     }
 
     // Click handler — opens lightbox (implemented in lightbox.js)
-    cell.addEventListener("click", () => {
-        if (typeof Lightbox !== "undefined" && Lightbox.open) {
-            Lightbox.open(item.id);
-        }
-    });
+    cell.addEventListener("click", () => Lightbox.open(item.id));
 
     return cell;
 }
@@ -178,9 +190,7 @@ function renderBatch(items) {
     });
 
     // Notify video.js to observe new video elements
-    if (typeof VideoManager !== "undefined" && VideoManager.observeNewVideos) {
-        VideoManager.observeNewVideos();
-    }
+    VideoManager.observeNewVideos();
 }
 
 
@@ -194,7 +204,7 @@ async function loadNextPage() {
     if (Wall.isLoading || !Wall.hasMore) return;
 
     // Don't load media if no include tags are selected (blank wall state)
-    if (typeof Controls !== "undefined" && Controls.activeFilterTags.size === 0) return;
+    if (Controls.activeFilterTags.size === 0) return;
 
     const generation = Wall.generation;
     Wall.isLoading = true;
@@ -239,7 +249,7 @@ async function reloadGrid() {
     document.getElementById("loading-indicator").style.display = "none";
 
     // If no include tags are selected, show placeholder instead of loading
-    if (typeof Controls !== "undefined" && Controls.activeFilterTags.size === 0) {
+    if (Controls.activeFilterTags.size === 0) {
         showPlaceholder();
         return;
     }
@@ -257,8 +267,8 @@ async function reloadGrid() {
  */
 function showPlaceholder() {
     const grid = document.getElementById("media-grid");
-    const tags = (typeof Controls !== "undefined" ? Controls.availableTags : []) || [];
-    const sentinel = (typeof Controls !== "undefined" ? Controls.untaggedSentinel : "__untagged__");
+    const tags = Controls.availableTags;
+    const sentinel = Controls.untaggedSentinel;
     const onlyUntagged = tags.length === 1 && tags[0].name === sentinel;
     const noTags = tags.length === 0;
 

@@ -64,7 +64,7 @@ const Lightbox = {
      */
     open(itemId) {
         // Don't open if in select mode
-        if (typeof Tags !== "undefined" && Tags.selectMode) return;
+        if (Tags.selectMode) return;
 
         this.currentId = itemId;
         this.isOpen = true;
@@ -72,9 +72,7 @@ const Lightbox = {
         document.body.style.overflow = "hidden";
 
         // Pause grid videos
-        if (typeof VideoManager !== "undefined") {
-            VideoManager.pauseAll();
-        }
+        VideoManager.pauseAll();
 
         this._displayItem(itemId);
     },
@@ -93,9 +91,7 @@ const Lightbox = {
         document.getElementById("lightbox-media").innerHTML = "";
 
         // Resume grid video autoplay
-        if (typeof VideoManager !== "undefined") {
-            VideoManager.resumeAll();
-        }
+        VideoManager.resumeAll();
 
         this.currentId = null;
     },
@@ -180,15 +176,11 @@ const Lightbox = {
             mediaContainer.appendChild(video);
         }
 
-        // Update info bar
-        const tags = item.tags && item.tags.length > 0
-            ? item.tags.map(t => `<span class="lightbox-tag">${this._escapeHtml(t)}</span>`).join("")
-            : '<span class="lightbox-no-tags">No tags</span>';
-
+        // Update info bar (the tag editor fills #lightbox-tags below)
         infoContainer.innerHTML = `
-            <div class="lightbox-info-filename">${this._escapeHtml(item.filename)}</div>
-            <div class="lightbox-info-path">${this._escapeHtml(item.relative_path)}</div>
-            <div class="lightbox-info-tags" id="lightbox-tags">${tags}</div>
+            <div class="lightbox-info-filename">${escapeHtml(item.filename)}</div>
+            <div class="lightbox-info-path">${escapeHtml(item.relative_path)}</div>
+            <div class="lightbox-info-tags" id="lightbox-tags"></div>
             ${item.type === "video" ? `<button class="lightbox-loop-btn ${this.videoLoop ? 'active' : ''}" id="lightbox-loop" title="Toggle loop">&#128257;</button>` : ""}
             <button class="lightbox-delete-btn" id="lightbox-delete" title="Move to trash">&#128465;</button>
         `;
@@ -206,10 +198,10 @@ const Lightbox = {
 
         // Delete button handler
         document.getElementById("lightbox-delete").addEventListener("click", () => {
-            if (typeof Tags !== "undefined") {
-                Tags.deleteCurrent(item.id);
-            }
+            Tags.deleteCurrent(item.id);
         });
+
+        Tags._renderLightboxTagEditor(itemId);
 
         // Update nav button visibility
         const items = Wall.items;
@@ -243,19 +235,6 @@ const Lightbox = {
                 e.preventDefault();
                 break;
         }
-    },
-
-    /**
-     * Escape HTML special characters to prevent XSS.
-     *
-     * @param {string} text
-     * @returns {string}
-     * @private
-     */
-    _escapeHtml(text) {
-        const div = document.createElement("div");
-        div.textContent = text;
-        return div.innerHTML;
     },
 };
 

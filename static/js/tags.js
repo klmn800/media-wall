@@ -9,6 +9,9 @@
  * - Select Mode with checkboxes and bulk action bar
  * - Bulk tag and bulk delete operations
  */
+/** The tag the heart buttons toggle */
+const FAVORITES_TAG = "favorites";
+
 const Tags = {
     /** Whether Select Mode is active */
     selectMode: false,
@@ -24,7 +27,6 @@ const Tags = {
         this._createTagDialog();
         this._createConfirmDialog();
         this._setupHoverTags();
-        this._addLightboxTagUI();
     },
 
     /* ------------------------------------------------------------------
@@ -66,7 +68,7 @@ const Tags = {
         if (!item) return;
 
         // Favorites button (always shown on hover)
-        const isFav = (item.tags || []).includes("favorites");
+        const isFav = (item.tags || []).includes(FAVORITES_TAG);
         const favBtn = document.createElement("button");
         favBtn.className = "fav-btn" + (isFav ? " active" : "");
         favBtn.innerHTML = isFav ? "&#9829;" : "&#9825;";
@@ -82,7 +84,7 @@ const Tags = {
             const overlay = document.createElement("div");
             overlay.className = "hover-tags-overlay";
             overlay.innerHTML = item.tags
-                .map(t => `<span class="hover-tag">${this._escapeHtml(t)}</span>`)
+                .map(t => `<span class="hover-tag">${escapeHtml(t)}</span>`)
                 .join("");
             gridItem.appendChild(overlay);
         }
@@ -103,20 +105,8 @@ const Tags = {
        ------------------------------------------------------------------ */
 
     /**
-     * Add tag editing UI to the lightbox info bar.
-     */
-    _addLightboxTagUI() {
-        // We'll inject the tag editor when the lightbox displays an item.
-        // Override Lightbox._displayItem to add our tag editor after it runs.
-        const originalDisplay = Lightbox._displayItem.bind(Lightbox);
-        Lightbox._displayItem = (itemId) => {
-            originalDisplay(itemId);
-            this._renderLightboxTagEditor(itemId);
-        };
-    },
-
-    /**
      * Render the tag editor in the lightbox info bar.
+     * Called by Lightbox._displayItem, and again after each tag change.
      */
     _renderLightboxTagEditor(itemId) {
         // Clean up previous autocomplete instance
@@ -132,7 +122,7 @@ const Tags = {
         if (!item) return;
 
         // Build favorites button + tag chips with remove buttons + add input
-        const isFav = (item.tags || []).includes("favorites");
+        const isFav = (item.tags || []).includes(FAVORITES_TAG);
         let html = `<button class="lightbox-fav-btn${isFav ? " active" : ""}"
                             id="lightbox-fav-btn"
                             title="${isFav ? "Remove from favorites" : "Add to favorites"}">
@@ -141,9 +131,9 @@ const Tags = {
         if (item.tags && item.tags.length > 0) {
             html += item.tags.map(t =>
                 `<span class="lightbox-tag editable">
-                    ${this._escapeHtml(t)}
-                    <button class="tag-remove" data-tag="${this._escapeHtml(t)}"
-                            data-item="${this._escapeHtml(itemId)}">&times;</button>
+                    ${escapeHtml(t)}
+                    <button class="tag-remove" data-tag="${escapeHtml(t)}"
+                            data-item="${escapeHtml(itemId)}">&times;</button>
                 </span>`
             ).join("");
         }
@@ -176,7 +166,7 @@ const Tags = {
         input.addEventListener("keydown", (e) => e.stopPropagation());
 
         this._lightboxAutocomplete = Autocomplete.attach(input, {
-            getItems: () => (typeof Controls !== "undefined" ? Controls.availableTags : []),
+            getItems: () => Controls.availableTags,
             getExclude: () => item.tags || [],
             direction: "up",
             onSelect: async (tagName) => {
@@ -323,7 +313,7 @@ const Tags = {
         input.addEventListener("keydown", (e) => e.stopPropagation());
 
         Autocomplete.attach(input, {
-            getItems: () => (typeof Controls !== "undefined" ? Controls.availableTags : []),
+            getItems: () => Controls.availableTags,
             getExclude: () => {
                 // Exclude tags already typed in the comma-separated list
                 return input.value.split(",").map(t => t.trim()).filter(t => t);
@@ -491,11 +481,11 @@ const Tags = {
         const item = Wall.items.find(i => i.id === itemId);
         if (!item) return;
 
-        const isFav = (item.tags || []).includes("favorites");
+        const isFav = (item.tags || []).includes(FAVORITES_TAG);
         if (isFav) {
-            await this._removeTagsFromItems([itemId], ["favorites"]);
+            await this._removeTagsFromItems([itemId], [FAVORITES_TAG]);
         } else {
-            await this._addTagsToItems([itemId], ["favorites"]);
+            await this._addTagsToItems([itemId], [FAVORITES_TAG]);
         }
 
         // Refresh hover overlay if visible
@@ -507,7 +497,7 @@ const Tags = {
         }
 
         // Refresh lightbox tag editor if open
-        if (typeof Lightbox !== "undefined" && Lightbox.currentId === itemId) {
+        if (Lightbox.currentId === itemId) {
             this._renderLightboxTagEditor(itemId);
         }
     },
@@ -607,15 +597,6 @@ const Tags = {
             if (cell) cell.remove();
         });
         return deleted;
-    },
-
-    /**
-     * Escape HTML special characters.
-     */
-    _escapeHtml(text) {
-        const div = document.createElement("div");
-        div.textContent = text;
-        return div.innerHTML;
     },
 };
 

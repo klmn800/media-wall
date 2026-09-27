@@ -119,6 +119,10 @@ Tags are the primary organizational tool. Each item can have multiple tags.
 - **Autocomplete** suggests existing tags as you type, with keyboard navigation
 - **Select Mode** (`S` key) enables multi-select: click items to select them, then use the bulk action bar to tag or delete multiple items at once
 
+Tag names are cleaned up when saved: lowercase, trimmed, and spaces become hyphens, so typing `Red Dress` saves `red-dress`. Commas and slashes aren't allowed. Folder names used as automatic tags get the same treatment.
+
+Tags follow a file when you move or rename its folder, as long as the file keeps its name and size and no other file has the same name and size.
+
 ### Tag Filtering (Include & Exclude)
 The wall starts empty by design — pick what you want to look at from the control panel (`F` key) before content loads. This keeps a fresh launch from immediately autoplaying every video in a large library.
 

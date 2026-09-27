@@ -149,17 +149,46 @@ def ask_media_directory_subprocess() -> Optional[str]:
     return path or None
 
 
-def save_config(config_path: str, config: configparser.ConfigParser) -> None:
-    """Write the current configuration back to the INI file.
+def _read_config_text(config_path: str) -> str:
+    """Read config.ini as UTF-8, falling back to the Windows codepage.
 
-    This is used to persist the user's chosen media directory (and any
-    other settings) so they don't have to pick it again next time.
+    Older versions saved it in the system codepage, so a folder path with
+    an accent in it may not be valid UTF-8.
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            return f.read()
+    except UnicodeDecodeError:
+        with open(config_path, encoding="mbcs" if os.name == "nt" else "latin-1") as f:
+            return f.read()
+
+
+def save_config(config_path: str, config: configparser.ConfigParser) -> None:
+    """Persist the chosen media directory to the INI file.
+
+    The media directory is the only setting the app changes at runtime, so
+    when config.ini exists just that one line is rewritten and the user's
+    comments and layout are kept. A missing file (first launch) gets a
+    full config written out. Always saved as UTF-8.
 
     Args:
         config_path: Path to the config.ini file.
         config: The ConfigParser instance to save.
     """
-    with open(config_path, "w") as f:
+    media_dir = config.get("media", "media_directory")
+    if os.path.exists(config_path):
+        text = _read_config_text(config_path)
+        pattern = re.compile(
+            r"^(\[media\][ \t]*\n(?:(?!\[).*\n)*?[ \t]*media_directory[ \t]*[=:])[^\n]*",
+            re.MULTILINE,
+        )
+        new_text, count = pattern.subn(lambda m: f"{m.group(1)} {media_dir}", text, count=1)
+        if count:
+            with open(config_path, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            logger.info(f"Saved media directory to {config_path}")
+            return
+    with open(config_path, "w", encoding="utf-8") as f:
         config.write(f)
     logger.info(f"Saved configuration to {config_path}")
 
@@ -179,7 +208,7 @@ def load_config(config_path: str) -> configparser.ConfigParser:
         config[section] = values
     # Override with file values if present
     if os.path.exists(config_path):
-        config.read(config_path)
+        config.read_string(_read_config_text(config_path), source=config_path)
         logger.info(f"Loaded config from {config_path}")
     else:
         logger.warning(f"Config file not found at {config_path}, using defaults")
@@ -501,6 +530,48 @@ def save_metadata(media_dir: str, metadata: dict[str, Any]) -> None:
         raise MetadataError(f"Could not save {meta_path}: {e}") from e
 
 
+# Fields a scan writes itself. Anything else on an entry was added by
+# another tool and is carried along untouched.
+SCAN_FIELDS = {"tags", "type", "size", "modified", "filename",
+               "poster_filename", "optimized_filename"}
+
+# Cache folders and the metadata field naming each item's file in them.
+CACHE_FOLDERS = {".posters": "poster_filename", ".optimized": "optimized_filename"}
+
+
+def remove_cache_files(media_dir: str, entry: dict[str, Any]) -> None:
+    """Delete the poster / grid image belonging to one metadata entry."""
+    for folder, field in CACHE_FOLDERS.items():
+        name = entry.get(field)
+        if name:
+            try:
+                os.remove(os.path.join(media_dir, folder, name))
+            except OSError:
+                pass
+
+
+def remove_orphan_cache_files(media_dir: str, items: dict[str, Any]) -> int:
+    """Delete cache files no item points to (left by deletes, moves, renames).
+
+    Returns:
+        Number of files removed.
+    """
+    removed = 0
+    for folder, field in CACHE_FOLDERS.items():
+        in_use = {entry.get(field) for entry in items.values()}
+        folder_path = os.path.join(media_dir, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        for name in os.listdir(folder_path):
+            if name not in in_use:
+                try:
+                    os.remove(os.path.join(folder_path, name))
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
 def perform_scan(media_dir: str) -> dict[str, Any]:
     """Run a full scan: discover files, generate posters/optimized, update metadata.
 
@@ -585,9 +656,12 @@ def perform_scan(media_dir: str) -> dict[str, Any]:
         metadata["items"] = items
         metadata["last_scan"] = datetime.now().isoformat()
         save_metadata(media_dir, metadata)
+        orphans = remove_orphan_cache_files(media_dir, items)
 
     for new_path, old_path in moved.items():
         logger.info(f"Moved: {old_path} -> {new_path} (tags kept)")
+    if orphans:
+        logger.info(f"Removed {orphans} unused cache files")
     logger.info(
         f"Scan complete: {len(scanned_items)} total, "
         f"{len(new_paths) - len(moved)} new, {len(removed_paths) - len(moved)} removed, "
@@ -601,11 +675,6 @@ def perform_scan(media_dir: str) -> dict[str, Any]:
         "moved_items": len(moved),
     }
 
-
-# Fields a scan writes itself. Anything else on an entry was added by
-# another tool and is carried along untouched.
-SCAN_FIELDS = {"tags", "type", "size", "modified", "filename",
-               "poster_filename", "optimized_filename"}
 
 
 def _match_moved_files(
@@ -1049,7 +1118,7 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                 src_path = os.path.join(media_dir, item_id)
                 if not os.path.exists(src_path):
                     # Already gone from disk: drop it from the library too.
-                    del metadata["items"][item_id]
+                    remove_cache_files(media_dir, metadata["items"].pop(item_id))
                     deleted_ids.append(item_id)
                     continue
 
@@ -1064,7 +1133,7 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                         dest_path = os.path.join(trash_dir, f"{stem}_{path_hash}{ext}")
 
                     _move_with_retry(src_path, dest_path)
-                    del metadata["items"][item_id]
+                    remove_cache_files(media_dir, metadata["items"].pop(item_id))
                     deleted_ids.append(item_id)
                     logger.info(f"Trashed: {item_id}")
 
