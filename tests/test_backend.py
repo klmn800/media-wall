@@ -20,6 +20,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
+from PIL import Image
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import media_wall as mw  # noqa: E402
 
@@ -35,23 +37,30 @@ class Library:
     """A throwaway media folder with an in-process Media Wall app."""
 
     def __init__(self, files: list[str], meta: dict | None = None,
-                 raw_meta: str | None = None):
+                 raw_meta: str | None = None, config_path: str = ""):
         self.root = tempfile.mkdtemp(prefix="mw_test_")
         self.media = os.path.join(self.root, "media")
         os.makedirs(self.media)
         for rel in files:
             path = os.path.join(self.media, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "wb") as f:
-                f.write(b"\0" * (len(rel) + 10))
+            if rel.endswith(".jpg"):
+                Image.new("RGB", (20, 10 + len(rel)), (200, 50, 50)).save(path)
+            else:
+                with open(path, "wb") as f:
+                    f.write(b"\0" * (len(rel) + 10))
         if meta is not None:
             self.write_meta_raw(json.dumps(meta))
         if raw_meta is not None:
             self.write_meta_raw(raw_meta)
-        config = mw.load_config(os.path.join(self.root, "no_config.ini"))
+        config = mw.load_config(config_path or os.path.join(self.root, "no_config.ini"))
         config.set("media", "media_directory", self.media)
-        self.app = mw.create_app(config)
+        self.app = mw.create_app(config, config_path)
         self.client = self.app.test_client()
+
+    def cache_files(self, folder: str) -> list[str]:
+        path = os.path.join(self.media, folder)
+        return sorted(os.listdir(path)) if os.path.isdir(path) else []
 
     @property
     def meta_path(self) -> str:
@@ -301,6 +310,67 @@ def test_ambiguous_move_does_not_guess():
 
 
 # ---------------------------------------------------------------------------
+# Housekeeping
+# ---------------------------------------------------------------------------
+def test_delete_removes_cache_files():
+    lib = Library(["a.jpg", "b.jpg"])
+    try:
+        before = lib.cache_files(".optimized")
+        lib.client.post("/api/delete", json={"item_ids": ["a.jpg"]})
+        after = lib.cache_files(".optimized")
+        check("grid image of the deleted file removed",
+              len(before) == 2 and len(after) == 1 and after[0].startswith("b_"),
+              f"{before} -> {after}")
+    finally:
+        lib.close()
+
+
+def test_scan_removes_orphan_cache_files():
+    lib = Library(["a.jpg"])
+    try:
+        for folder in (".optimized", ".posters"):
+            with open(os.path.join(lib.media, folder, "gone_deadbeef.jpg"), "wb") as f:
+                f.write(b"x")
+        lib.client.post("/api/scan")
+        check("orphan grid image removed", "gone_deadbeef.jpg" not in lib.cache_files(".optimized"),
+              str(lib.cache_files(".optimized")))
+        check("orphan poster removed", "gone_deadbeef.jpg" not in lib.cache_files(".posters"),
+              str(lib.cache_files(".posters")))
+        check("grid image still in use is kept", len(lib.cache_files(".optimized")) == 1,
+              str(lib.cache_files(".optimized")))
+    finally:
+        lib.close()
+
+
+def test_folder_switch_keeps_config_comments():
+    scratch = tempfile.mkdtemp(prefix="mw_cfg_")
+    config_path = os.path.join(scratch, "config.ini")
+    original = ("; My notes about this setup\n[server]\nport = 5000\n\n[media]\n"
+                "; where the clips live\nmedia_directory = C:/somewhere\n\n[grid]\n"
+                "column_width = 300  ; keep this dense\n")
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(original)
+    lib = Library(["a.mp4"], config_path=config_path)
+    new_dir = os.path.join(lib.root, "Café clips")
+    os.makedirs(new_dir)
+    try:
+        resp = lib.client.post("/api/set-media-dir", json={"path": new_dir})
+        with open(config_path, encoding="utf-8") as f:
+            text = f.read()
+        check("switch succeeded", resp.status_code == 200, f"code {resp.status_code}")
+        check("comments kept", "; My notes about this setup" in text
+              and "; where the clips live" in text and "; keep this dense" in text)
+        check("new folder saved (with its accent)",
+              f"media_directory = {os.path.normpath(new_dir)}" in text)
+        check("config still loads with the new folder",
+              mw.load_config(config_path).get("media", "media_directory")
+              == os.path.normpath(new_dir))
+    finally:
+        lib.close()
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 TESTS = [
@@ -316,6 +386,9 @@ TESTS = [
     test_folder_tags_are_normalized,
     test_moved_file_keeps_its_tags,
     test_ambiguous_move_does_not_guess,
+    test_delete_removes_cache_files,
+    test_scan_removes_orphan_cache_files,
+    test_folder_switch_keeps_config_comments,
 ]
 
 

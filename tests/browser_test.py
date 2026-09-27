@@ -196,6 +196,25 @@ def run_checks(page: Page) -> None:
           str(r["local"]))
     check("a rejected tag shows a message", bool(r["toast"]), str(r["toast"]))
 
+    print("\ntag names with quotes")
+    r = page.eval("""
+        await showSet();
+        const id = Wall.items[0].id;
+        await Tags._addTagsToItems([id], ['it\\'s "quoted"']); await sleep(300);
+        const tag = Wall.items[0].tags.find(t => t.includes("quoted"));
+        const chip = [...document.querySelectorAll(".tag-filter-btn")].find(b => b.dataset.tag === tag);
+        Lightbox.open(id); await sleep(100);
+        const removeBtn = [...document.querySelectorAll("#lightbox-tags .tag-remove")]
+            .find(b => b.dataset.tag === tag);
+        if (removeBtn) { removeBtn.click(); await sleep(300); }
+        const removed = !Wall.items[0].tags.includes(tag);
+        Lightbox.close();
+        return {tag, chip: !!chip, removeBtn: !!removeBtn, removed};
+    """)
+    check("filter chip carries the exact tag name", r["chip"], str(r["tag"]))
+    check("lightbox remove button carries the exact tag name", r["removeBtn"])
+    check("the tag can be removed from the lightbox", r["removed"])
+
     print("\nkeyboard")
     r = page.eval("""
         if (!Controls.panelOpen) Controls.togglePanel();
