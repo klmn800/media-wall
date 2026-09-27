@@ -89,15 +89,8 @@ const Lightbox = {
         this.overlay.classList.remove("active");
         document.body.style.overflow = "";
 
-        // Clean up any playing lightbox video
-        const mediaContainer = document.getElementById("lightbox-media");
-        const video = mediaContainer.querySelector("video");
-        if (video) {
-            video.pause();
-            video.removeAttribute("src");
-            video.load();
-        }
-        mediaContainer.innerHTML = "";
+        this.releaseMedia();
+        document.getElementById("lightbox-media").innerHTML = "";
 
         // Resume grid video autoplay
         if (typeof VideoManager !== "undefined") {
@@ -108,31 +101,48 @@ const Lightbox = {
     },
 
     /**
-     * Navigate to the previous or next item.
-     *
-     * @param {number} direction - -1 for previous, +1 for next.
+     * Stop and unload the lightbox video, if any, so the browser lets go
+     * of the file (Windows can't move a file that is still open).
      */
-    navigate(direction) {
-        if (!this.isOpen || !this.currentId) return;
-
-        const items = Wall.items;
-        const currentIndex = items.findIndex(i => i.id === this.currentId);
-        if (currentIndex === -1) return;
-
-        const newIndex = currentIndex + direction;
-        if (newIndex < 0 || newIndex >= items.length) return;
-
-        // Clean up current media before switching
-        const mediaContainer = document.getElementById("lightbox-media");
-        const video = mediaContainer.querySelector("video");
+    releaseMedia() {
+        const video = document.getElementById("lightbox-media").querySelector("video");
         if (video) {
             video.pause();
             video.removeAttribute("src");
             video.load();
         }
+    },
 
-        this.currentId = items[newIndex].id;
-        this._displayItem(this.currentId);
+    /**
+     * Switch the open lightbox to another item.
+     *
+     * @param {string} itemId - The item's relative path / ID.
+     */
+    show(itemId) {
+        this.releaseMedia();
+        this.currentId = itemId;
+        this._displayItem(itemId);
+    },
+
+    /**
+     * Navigate to the previous or next item. Stepping past the last loaded
+     * item loads the next batch first, so the whole filtered set is reachable.
+     *
+     * @param {number} direction - -1 for previous, +1 for next.
+     */
+    async navigate(direction) {
+        if (!this.isOpen || !this.currentId) return;
+
+        const currentIndex = Wall.items.findIndex(i => i.id === this.currentId);
+        if (currentIndex === -1) return;
+
+        const newIndex = currentIndex + direction;
+        if (newIndex >= Wall.items.length && Wall.hasMore) {
+            await loadNextPage();
+        }
+        if (newIndex < 0 || newIndex >= Wall.items.length || !this.isOpen) return;
+
+        this.show(Wall.items[newIndex].id);
     },
 
     /**
@@ -207,7 +217,7 @@ const Lightbox = {
         document.getElementById("lightbox-prev").style.display =
             currentIndex > 0 ? "" : "none";
         document.getElementById("lightbox-next").style.display =
-            currentIndex < items.length - 1 ? "" : "none";
+            currentIndex < items.length - 1 || Wall.hasMore ? "" : "none";
     },
 
     /**

@@ -747,8 +747,8 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         """Return a paginated, sorted, filtered list of media items.
 
         Query parameters:
-            page (int): Page number, 1-based. Default 1.
-            per_page (int): Items per page. Default from config batch_size.
+            offset (int): How many matching items to skip. Default 0.
+            per_page (int): Items to return (1-500). Default from config batch_size.
             sort_by (str): Sort field — 'modified', 'filename', 'size', 'type'.
                            Default 'modified'.
             sort_order (str): 'desc' or 'asc'. Default 'desc'.
@@ -758,8 +758,8 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             search (str): Filename substring filter (case-insensitive).
 
         Returns:
-            JSON with keys: items (list), page, per_page, total_items,
-            total_pages, has_more.
+            JSON with keys: items (list), offset, per_page, total_items,
+            has_more.
         """
         with _metadata_lock:
             metadata = load_metadata(_media_dir())
@@ -842,7 +842,9 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             items.sort(key=lambda i: i["modified"], reverse=reverse)
 
         # --- Pagination ---
-        page = max(1, request.args.get("page", 1, type=int))
+        # Offset-based: the page asks for "the next N after the ones I
+        # have", so deleting items doesn't shift page boundaries.
+        offset = max(0, request.args.get("offset", 0, type=int))
         per_page = request.args.get(
             "per_page",
             config.getint("pagination", "batch_size"),
@@ -850,18 +852,14 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         )
         per_page = min(max(1, per_page), 500)
         total_items = len(items)
-        total_pages = max(1, (total_items + per_page - 1) // per_page)
-        start = (page - 1) * per_page
-        end = start + per_page
-        page_items = items[start:end]
+        page_items = items[offset:offset + per_page]
 
         return jsonify({
             "items": page_items,
-            "page": page,
+            "offset": offset,
             "per_page": per_page,
             "total_items": total_items,
-            "total_pages": total_pages,
-            "has_more": page < total_pages,
+            "has_more": offset + len(page_items) < total_items,
         })
 
     @app.route("/api/scan", methods=["POST"])
@@ -1023,7 +1021,8 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             item_ids (list[str]): Relative paths of items to delete.
 
         Returns:
-            JSON with 'deleted' count and 'errors' list.
+            JSON with 'deleted' count, 'deleted_ids' (items no longer in the
+            library), and 'errors' list.
         """
         body = request.get_json()
         if not body:
@@ -1037,7 +1036,7 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         trash_dir = os.path.join(media_dir, ".trash")
         os.makedirs(trash_dir, exist_ok=True)
 
-        deleted = 0
+        deleted_ids = []
         errors = []
         with _metadata_lock:
             metadata = load_metadata(media_dir)
@@ -1049,7 +1048,9 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                     continue
                 src_path = os.path.join(media_dir, item_id)
                 if not os.path.exists(src_path):
-                    errors.append(f"File not found: {item_id}")
+                    # Already gone from disk: drop it from the library too.
+                    del metadata["items"][item_id]
+                    deleted_ids.append(item_id)
                     continue
 
                 try:
@@ -1062,9 +1063,9 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                         path_hash = hashlib.md5(item_id.encode()).hexdigest()[:8]
                         dest_path = os.path.join(trash_dir, f"{stem}_{path_hash}{ext}")
 
-                    shutil.move(src_path, dest_path)
+                    _move_with_retry(src_path, dest_path)
                     del metadata["items"][item_id]
-                    deleted += 1
+                    deleted_ids.append(item_id)
                     logger.info(f"Trashed: {item_id}")
 
                 except Exception as e:
@@ -1072,7 +1073,24 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                     logger.error(f"Delete failed for {item_id}: {e}")
 
             save_metadata(media_dir, metadata)
-        return jsonify({"deleted": deleted, "errors": errors})
+        return jsonify({"deleted": len(deleted_ids), "deleted_ids": deleted_ids,
+                        "errors": errors})
+
+    def _move_with_retry(src: str, dest: str) -> None:
+        """Move a file, retrying briefly if Windows reports it in use.
+
+        A video that was just streaming to the browser can still be open
+        for a moment after the page lets go of it.
+        """
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                shutil.move(src, dest)
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
 
     # -----------------------------------------------------------------------
     # Routes — Media directory switching

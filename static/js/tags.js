@@ -180,7 +180,8 @@ const Tags = {
             getExclude: () => item.tags || [],
             direction: "up",
             onSelect: async (tagName) => {
-                await this._addTagsToItems([itemId], [tagName]);
+                // On failure keep the typed text so it can be fixed
+                if (!await this._addTagsToItems([itemId], [tagName])) return;
                 input.value = "";
                 this._renderLightboxTagEditor(itemId);
             },
@@ -203,6 +204,7 @@ const Tags = {
         }
 
         this._updateBulkBar();
+        Controls._updateSelectModeBtn();
     },
 
     /**
@@ -366,10 +368,10 @@ const Tags = {
         if (tags.length === 0) return;
 
         const itemIds = Array.from(this.selectedItems);
-        await this._addTagsToItems(itemIds, tags);
+        // On failure keep the dialog open so the tags can be fixed
+        if (!await this._addTagsToItems(itemIds, tags)) return;
 
         document.getElementById("tag-dialog").classList.remove("active");
-        this.clearSelection();
         this.toggleSelectMode();
     },
 
@@ -443,13 +445,13 @@ const Tags = {
 
             const itemIds = Array.from(this.selectedItems);
             await this._deleteItems(itemIds);
-            this.clearSelection();
             this.toggleSelectMode();
         });
     },
 
     /**
-     * Delete a single item from the lightbox.
+     * Delete a single item from the lightbox, then show the item that
+     * followed it (or the one before, if it was last).
      */
     async deleteCurrent(itemId) {
         const confirmed = await this._confirm(
@@ -458,24 +460,23 @@ const Tags = {
         );
         if (!confirmed) return;
 
-        await this._deleteItems([itemId]);
+        const index = Wall.items.findIndex(i => i.id === itemId);
+        Lightbox.releaseMedia();
+        const deleted = await this._deleteItems([itemId]);
+        if (!deleted.includes(itemId)) {
+            // Delete failed: put the item back on screen
+            if (Lightbox.isOpen && Lightbox.currentId === itemId) Lightbox.show(itemId);
+            return;
+        }
+        if (!Lightbox.isOpen) return;
 
-        // Navigate to next item or close lightbox
-        if (Lightbox.isOpen) {
-            const remaining = Wall.items;
-            if (remaining.length === 0) {
-                Lightbox.close();
-            } else {
-                // Find next item to display
-                const currentIndex = remaining.findIndex(i => i.id === Lightbox.currentId);
-                const nextIndex = currentIndex >= 0 ? currentIndex : 0;
-                if (nextIndex < remaining.length) {
-                    Lightbox.currentId = remaining[nextIndex].id;
-                    Lightbox._displayItem(Lightbox.currentId);
-                } else {
-                    Lightbox.close();
-                }
-            }
+        if (index >= Wall.items.length && Wall.hasMore) {
+            await loadNextPage();
+        }
+        if (Wall.items.length === 0) {
+            Lightbox.close();
+        } else {
+            Lightbox.show(Wall.items[Math.min(Math.max(index, 0), Wall.items.length - 1)].id);
         }
     },
 
@@ -515,66 +516,97 @@ const Tags = {
        API Helpers
        ------------------------------------------------------------------ */
 
+    /**
+     * Send a JSON request to the API. Shows a toast and returns null on
+     * any failure, so callers only handle success.
+     */
+    async _api(method, url, body) {
+        try {
+            const response = await fetch(url, {
+                method,
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            if (!response.ok) {
+                showToast(await responseError(response));
+                return null;
+            }
+            return await response.json();
+        } catch (err) {
+            showToast(`Couldn't reach Media Wall: ${err.message}`);
+            return null;
+        }
+    },
+
+    /** Add tags to items. Returns true if they were saved. */
     async _addTagsToItems(itemIds, tags) {
-        const response = await fetch("/api/tags", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ item_ids: itemIds, tags: tags }),
+        const data = await this._api("POST", "/api/tags", { item_ids: itemIds, tags });
+        if (!data) return false;
+        // Update local state with the names the server saved
+        // (it normalizes them: "Red Dress" -> "red-dress")
+        const saved = data.tags || [];
+        itemIds.forEach(id => {
+            const item = Wall.items.find(i => i.id === id);
+            if (item) {
+                const existing = new Set(item.tags || []);
+                saved.forEach(t => existing.add(t));
+                item.tags = Array.from(existing).sort();
+            }
         });
-        if (response.ok) {
-            // Update local state with the names the server saved
-            // (it normalizes them: "Red Dress" -> "red-dress")
-            const saved = (await response.json()).tags || [];
-            itemIds.forEach(id => {
-                const item = Wall.items.find(i => i.id === id);
-                if (item) {
-                    const existing = new Set(item.tags || []);
-                    saved.forEach(t => existing.add(t));
-                    item.tags = Array.from(existing).sort();
-                }
-            });
-        }
+        // A brand-new tag should be suggested on the very next item
+        const known = new Set(Controls.availableTags.map(t => t.name));
+        if (saved.some(t => !known.has(t))) await Controls._loadTags();
+        return true;
     },
 
+    /** Remove tags from items. Returns true if the change was saved. */
     async _removeTagsFromItems(itemIds, tags) {
-        const response = await fetch("/api/tags", {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ item_ids: itemIds, tags: tags }),
+        const data = await this._api("DELETE", "/api/tags", { item_ids: itemIds, tags });
+        if (!data) return false;
+        const removeSet = new Set(data.tags || []);
+        itemIds.forEach(id => {
+            const item = Wall.items.find(i => i.id === id);
+            if (item) {
+                item.tags = (item.tags || []).filter(t => !removeSet.has(t));
+            }
         });
-        if (response.ok) {
-            const removeSet = new Set((await response.json()).tags || []);
-            itemIds.forEach(id => {
-                const item = Wall.items.find(i => i.id === id);
-                if (item) {
-                    item.tags = (item.tags || []).filter(t => !removeSet.has(t));
-                }
-            });
-        }
+        return true;
     },
 
+    /**
+     * Move items to trash and take their tiles off the wall. The rest of
+     * the wall stays put (paging is offset-based, so nothing is skipped).
+     *
+     * @returns {Promise<string[]>} IDs that were actually deleted.
+     */
     async _deleteItems(itemIds) {
-        const response = await fetch("/api/delete", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ item_ids: itemIds }),
+        // Let go of any grid video about to be moved (Windows can't move an open file)
+        itemIds.forEach(id => {
+            const video = document.querySelector(
+                `.grid-item[data-item-id="${CSS.escape(id)}"] video`);
+            if (video && video.getAttribute("src")) {
+                video.pause();
+                video.removeAttribute("src");
+                video.load();
+            }
         });
-        if (response.ok) {
-            const idSet = new Set(itemIds);
-            // Local removal first for snappy UI
-            Wall.items = Wall.items.filter(i => !idSet.has(i.id));
-            itemIds.forEach(id => {
-                const cell = document.querySelector(
-                    `.grid-item[data-item-id="${CSS.escape(id)}"]`
-                );
-                if (cell) cell.remove();
-            });
-            // Resync pagination — server-side page boundaries have shifted
-            // by N deleted items, so without this the next infinite-scroll
-            // fetch would skip N items. Reload happens behind the lightbox
-            // when applicable; user only sees the wipe after closing it.
-            await reloadGrid();
+
+        const data = await this._api("POST", "/api/delete", { item_ids: itemIds });
+        if (!data) return [];
+        const deleted = data.deleted_ids || [];
+        if (data.errors && data.errors.length) {
+            showToast(data.errors.join("; "));
         }
+
+        const idSet = new Set(deleted);
+        Wall.items = Wall.items.filter(i => !idSet.has(i.id));
+        deleted.forEach(id => {
+            const cell = document.querySelector(
+                `.grid-item[data-item-id="${CSS.escape(id)}"]`
+            );
+            if (cell) cell.remove();
+        });
+        return deleted;
     },
 
     /**

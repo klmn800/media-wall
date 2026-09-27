@@ -201,7 +201,7 @@ def test_delete_refuses_paths_outside_media_folder():
 def test_bad_page_size_does_not_crash():
     lib = Library(["a.mp4"])
     try:
-        for q in ("per_page=0", "per_page=-5", "page=0", "per_page=abc"):
+        for q in ("per_page=0", "per_page=-5", "offset=-3", "per_page=abc"):
             code = lib.client.get(f"/api/media?{q}").status_code
             check(f"/api/media?{q} is handled", code == 200, f"code {code}")
     finally:

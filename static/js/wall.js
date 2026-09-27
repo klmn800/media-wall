@@ -10,8 +10,11 @@ const Wall = {
     /** All media items currently loaded in the grid */
     items: [],
 
-    /** Current page number for pagination (1-based) */
-    currentPage: 0,
+    /**
+     * Bumped on every reload. A fetch that returns after a reload belongs
+     * to the old filters and is thrown away.
+     */
+    generation: 0,
 
     /** Whether more pages are available from the server */
     hasMore: true,
@@ -32,14 +35,51 @@ const Wall = {
 
 
 /**
- * Fetch a page of media items from the API.
+ * Show a short message at the bottom of the screen.
  *
- * @param {number} page - Page number to fetch (1-based).
+ * Used for anything that failed, so errors aren't silently swallowed.
+ *
+ * @param {string} message
+ */
+function showToast(message) {
+    let toast = document.getElementById("toast");
+    if (!toast) {
+        toast = document.createElement("div");
+        toast.id = "toast";
+        toast.className = "toast";
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.classList.add("active");
+    clearTimeout(showToast._timer);
+    showToast._timer = setTimeout(() => toast.classList.remove("active"), 5000);
+}
+
+
+/**
+ * Read the error message from a failed API response.
+ *
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+async function responseError(response) {
+    try {
+        const data = await response.json();
+        if (data && data.error) return data.error;
+    } catch (e) { /* not JSON */ }
+    return `Server error ${response.status}`;
+}
+
+
+/**
+ * Fetch the next batch of media items from the API.
+ *
+ * @param {number} offset - How many matching items the grid already has.
  * @returns {Promise<Object>} API response with items, has_more, total_items, etc.
  */
-async function fetchMedia(page) {
+async function fetchMedia(offset) {
     const params = new URLSearchParams({
-        page: page.toString(),
+        offset: offset.toString(),
         per_page: CONFIG.batchSize.toString(),
         sort_by: Wall.params.sort_by,
         sort_order: Wall.params.sort_order,
@@ -60,7 +100,7 @@ async function fetchMedia(page) {
 
     const response = await fetch(`/api/media?${params}`);
     if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+        throw new Error(await responseError(response));
     }
     return response.json();
 }
@@ -127,8 +167,11 @@ function createGridItem(item) {
  */
 function renderBatch(items) {
     const grid = document.getElementById("media-grid");
+    const have = new Set(Wall.items.map(i => i.id));
 
     items.forEach(item => {
+        // Guard against repeats if the library changed between batches
+        if (have.has(item.id)) return;
         const cell = createGridItem(item);
         grid.appendChild(cell);
         Wall.items.push(item);
@@ -153,26 +196,27 @@ async function loadNextPage() {
     // Don't load media if no include tags are selected (blank wall state)
     if (typeof Controls !== "undefined" && Controls.activeFilterTags.size === 0) return;
 
+    const generation = Wall.generation;
     Wall.isLoading = true;
     const loadingIndicator = document.getElementById("loading-indicator");
     loadingIndicator.style.display = "block";
 
     try {
-        Wall.currentPage++;
-        const data = await fetchMedia(Wall.currentPage);
+        const data = await fetchMedia(Wall.items.length);
+        // Filters changed while this was loading: these results are stale
+        if (generation !== Wall.generation) return;
 
         renderBatch(data.items);
         Wall.hasMore = data.has_more;
-
-        if (!Wall.hasMore) {
-            loadingIndicator.style.display = "none";
-        }
     } catch (error) {
+        if (generation !== Wall.generation) return;
         console.error("Failed to load media:", error);
-        loadingIndicator.textContent = "Failed to load media. Check console.";
+        showToast(`Couldn't load media: ${error.message}`);
+        // Stop infinite scroll from retrying in a loop; a filter change resets it
+        Wall.hasMore = false;
     } finally {
-        Wall.isLoading = false;
-        if (Wall.hasMore) {
+        if (generation === Wall.generation) {
+            Wall.isLoading = false;
             loadingIndicator.style.display = "none";
         }
     }
@@ -188,10 +232,11 @@ async function loadNextPage() {
 async function reloadGrid() {
     const grid = document.getElementById("media-grid");
     grid.innerHTML = "";
+    Wall.generation++;
     Wall.items = [];
-    Wall.currentPage = 0;
     Wall.hasMore = true;
     Wall.isLoading = false;
+    document.getElementById("loading-indicator").style.display = "none";
 
     // If no include tags are selected, show placeholder instead of loading
     if (typeof Controls !== "undefined" && Controls.activeFilterTags.size === 0) {

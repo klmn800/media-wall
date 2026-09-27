@@ -191,7 +191,6 @@ const Controls = {
         document.getElementById("autoscroll-speed").addEventListener("input", () => {}); // real-time, read in scroll loop
         document.getElementById("select-mode-btn").addEventListener("click", () => {
             Tags.toggleSelectMode();
-            this._updateSelectModeBtn();
         });
         document.getElementById("refresh-btn").addEventListener("click", () => this._onRefresh());
         document.getElementById("change-folder-btn").addEventListener("click", () => this._onChangeFolder());
@@ -314,6 +313,7 @@ const Controls = {
     async _loadTags() {
         try {
             const response = await fetch("/api/tags");
+            if (!response.ok) throw new Error(await responseError(response));
             const data = await response.json();
             this.availableTags = data.tags || [];
             if (data.untagged_sentinel) {
@@ -322,6 +322,7 @@ const Controls = {
             this._renderTagFilters();
         } catch (err) {
             console.error("Failed to load tags:", err);
+            showToast(`Couldn't load tags: ${err.message}`);
         }
     },
 
@@ -422,7 +423,7 @@ const Controls = {
                 `/api/tags/${encodeURIComponent(tagName)}`,
                 { method: "DELETE" }
             );
-            if (!response.ok) throw new Error(`API error: ${response.status}`);
+            if (!response.ok) throw new Error(await responseError(response));
 
             // Remove from active/exclude filter sets if present
             this.activeFilterTags.delete(tagName);
@@ -441,6 +442,7 @@ const Controls = {
             await this._applyFilters();
         } catch (err) {
             console.error("Failed to remove tag globally:", err);
+            showToast(`Couldn't remove tag: ${err.message}`);
         }
     },
 
@@ -608,17 +610,20 @@ const Controls = {
 
         try {
             const response = await fetch("/api/scan", { method: "POST" });
+            if (!response.ok) throw new Error(await responseError(response));
             const data = await response.json();
             btn.textContent = `Found ${data.total_items} items`;
             setTimeout(() => {
                 btn.textContent = "Refresh Library";
                 btn.disabled = false;
             }, 2000);
+            await this._loadTags();
             await reloadGrid();
         } catch (err) {
             btn.textContent = "Scan failed";
             btn.disabled = false;
             console.error("Scan failed:", err);
+            showToast(`Scan failed: ${err.message}`);
         }
     },
 
@@ -656,6 +661,7 @@ const Controls = {
             if (!setResp.ok) {
                 btn.textContent = "Failed";
                 console.error("Set media dir failed:", setData.error);
+                showToast(`Couldn't switch folder: ${setData.error}`);
                 setTimeout(() => {
                     btn.textContent = originalText;
                     btn.disabled = false;
@@ -691,6 +697,7 @@ const Controls = {
         } catch (err) {
             btn.textContent = "Failed";
             console.error("Change folder failed:", err);
+            showToast(`Couldn't switch folder: ${err.message}`);
             setTimeout(() => {
                 btn.textContent = originalText;
                 btn.disabled = false;
@@ -717,8 +724,13 @@ document.addEventListener("keydown", (e) => {
             break;
         case "s":
             Tags.toggleSelectMode();
-            Controls._updateSelectModeBtn();
             e.preventDefault();
+            break;
+        case "escape":
+            if (Controls.panelOpen) {
+                Controls.togglePanel();
+                e.preventDefault();
+            }
             break;
         case " ":
             Controls.toggleAutoscroll();

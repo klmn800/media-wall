@@ -41,11 +41,16 @@ build.bat                                 # PyInstaller one-file exe -> dist/med
 ```
 
 ```bash
-python tests/test_backend.py     # backend checks against throwaway libraries in a temp folder
+python tests/test_backend.py          # backend checks against throwaway libraries in a temp folder
+python tests/test_backend.py scan     # only checks whose name contains "scan"
+python tests/browser_test.py          # headless Edge drives the real page on a temp library
 ```
 
-There is no linter or JS build step. `tests/test_backend.py` is a plain script (no pytest):
-it prints PASS/FAIL per check and exits non-zero on any failure.
+There is no linter or JS build step. Both test files are plain scripts (no pytest): they
+print PASS/FAIL per check and exit non-zero on any failure. `browser_test.py` needs Edge and
+`websocket-client`. It drives the page over the DevTools protocol, calling the page's own
+globals (`Wall`, `Tags`, `Lightbox`, ...) from JS snippets. Its server port avoids 5060/5061,
+which Chromium blocks as "unsafe ports" (the page just fails to load).
 
 ## Architecture
 
