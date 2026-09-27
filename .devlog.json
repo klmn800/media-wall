@@ -1,0 +1,4 @@
+{"apps": {"media_wall": {"log": "docs/media_wall_devlog.md",
+  "paths": ["media_wall.py", "static/", "templates/", "tests/", "requirements.txt",
+            "config.ini.example", "build.bat", "README.md", "CLAUDE.md", "TAGGING_REVIEW.md",
+            ".gitignore"]}}}
