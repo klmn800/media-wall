@@ -351,6 +351,24 @@ def generate_optimized_image(image_path: str, optimized_dir: str) -> Optional[st
 # ---------------------------------------------------------------------------
 # Metadata persistence
 # ---------------------------------------------------------------------------
+class MetadataError(Exception):
+    """The metadata file could not be read or written.
+
+    Raised instead of falling back to an empty library, so a file that
+    can't be read is never saved over (which would wipe every tag).
+    """
+
+
+# Serializes every load-change-save of the metadata file. Flask serves
+# requests on several threads, and without this two overlapping saves
+# lose each other's changes.
+_metadata_lock = threading.RLock()
+
+# How long a save keeps retrying when another program (e.g. Beat Wall)
+# has the file open and Windows refuses to replace it.
+SAVE_RETRY_SECONDS = 3.0
+
+
 def load_metadata(media_dir: str) -> dict[str, Any]:
     """Load the metadata JSON file from the media directory.
 
@@ -368,31 +386,60 @@ def load_metadata(media_dir: str) -> dict[str, Any]:
         media_dir: Absolute path to the media directory.
 
     Returns:
-        Metadata dict. Returns empty structure if file doesn't exist.
+        Metadata dict. Returns empty structure if the file doesn't exist.
+
+    Raises:
+        MetadataError: The file exists but can't be read or isn't valid.
     """
     meta_path = os.path.join(media_dir, METADATA_FILENAME)
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"Failed to load metadata: {e}")
-    return {"last_scan": None, "items": {}}
+    if not os.path.exists(meta_path):
+        return {"last_scan": None, "items": {}}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        raise MetadataError(f"Could not read {meta_path}: {e}") from e
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("items"), dict):
+        raise MetadataError(f"{meta_path} is not a Media Wall metadata file")
+    return metadata
 
 
 def save_metadata(media_dir: str, metadata: dict[str, Any]) -> None:
     """Save the metadata JSON file to the media directory.
 
+    Writes a temp file and swaps it in with os.replace(), so a reader never
+    sees a half-written file. On Windows the swap fails while another
+    program has the file open, so it retries for a few seconds.
+
     Args:
         media_dir: Absolute path to the media directory.
         metadata: The metadata dict to persist.
+
+    Raises:
+        MetadataError: The file could not be written.
     """
     meta_path = os.path.join(media_dir, METADATA_FILENAME)
+    tmp_path = meta_path + ".tmp"
     try:
-        with open(meta_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        deadline = time.monotonic() + SAVE_RETRY_SECONDS
+        while True:
+            try:
+                os.replace(tmp_path, meta_path)
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
     except OSError as e:
-        logger.error(f"Failed to save metadata: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise MetadataError(f"Could not save {meta_path}: {e}") from e
 
 
 def perform_scan(media_dir: str) -> dict[str, Any]:
@@ -400,99 +447,142 @@ def perform_scan(media_dir: str) -> dict[str, Any]:
 
     This is the main scan orchestrator. It:
     1. Scans the directory for media files
-    2. Generates poster frames for videos
-    3. Generates optimized versions of images
-    4. Merges results with existing metadata (preserving tags)
-    5. Removes metadata entries for files that no longer exist
+    2. Generates poster frames and optimized images (slow; no lock held,
+       so tagging keeps working during a long scan)
+    3. Under the metadata lock: loads the current metadata, merges the scan
+       results into it (preserving tags), carries tags over for files that
+       moved, drops entries for files that are gone, and saves
 
     Args:
         media_dir: Absolute path to the media directory.
 
     Returns:
-        Dict with scan results: total_items, new_items, removed_items.
+        Dict with scan results: total_items, new_items, removed_items, moved_items.
+
+    Raises:
+        MetadataError: The metadata file can't be read or saved. Nothing is
+            written in that case.
     """
+    # Fail before the slow part if the metadata file is unreadable.
+    with _metadata_lock:
+        load_metadata(media_dir)
+
     # Ensure cache directories exist
     posters_dir = os.path.join(media_dir, ".posters")
     optimized_dir = os.path.join(media_dir, ".optimized")
     os.makedirs(posters_dir, exist_ok=True)
     os.makedirs(optimized_dir, exist_ok=True)
 
-    # Scan for files
     scanned_items = scan_media_directory(media_dir)
 
-    # Load existing metadata
-    metadata = load_metadata(media_dir)
-    existing_paths = set(metadata["items"].keys())
-    scanned_paths = set()
-
-    # Process each discovered file
     for item in scanned_items:
-        rel_path = item["relative_path"]
-        scanned_paths.add(rel_path)
-
-        # Generate poster frame for videos
         if item["type"] == "video":
             poster_path = generate_poster_frame(item["absolute_path"], posters_dir)
             if poster_path:
                 item["poster_filename"] = os.path.basename(poster_path)
-
-        # Generate optimized version for images
-        if item["type"] == "image":
+        else:
             opt_path = generate_optimized_image(item["absolute_path"], optimized_dir)
             if opt_path:
                 item["optimized_filename"] = os.path.basename(opt_path)
 
-        # Preserve existing tags, or auto-assign folder-based tags for new items
-        if rel_path in metadata["items"]:
-            item["tags"] = metadata["items"][rel_path].get("tags", [])
-        else:
-            # New item — derive tags from subfolder path components.
-            # e.g. "cyberpunk/session1/image.jpg" → tags: ["cyberpunk", "session1"]
-            # Root-level files get no auto-tags.
-            path_parts = rel_path.split("/")
-            folder_tags = path_parts[:-1] if len(path_parts) > 1 else []
-            item["tags"] = sorted(folder_tags)
+    with _metadata_lock:
+        metadata = load_metadata(media_dir)
+        existing = metadata["items"]
+        scanned_paths = {item["relative_path"] for item in scanned_items}
+        removed_paths = set(existing) - scanned_paths
+        new_paths = scanned_paths - set(existing)
+        moved = _match_moved_files(existing, removed_paths, scanned_items, new_paths)
 
-        # Update metadata entry, preserving any extra fields (e.g. prompt,
-        # created_with) that were added by external tools.
-        SCAN_FIELDS = {"tags", "type", "size", "modified", "filename",
-                       "poster_filename", "optimized_filename"}
-        existing_extra = {
-            k: v for k, v in metadata["items"].get(rel_path, {}).items()
-            if k not in SCAN_FIELDS
-        }
-        metadata["items"][rel_path] = {
-            "tags": item["tags"],
-            "type": item["type"],
-            "size": item["size"],
-            "modified": item["modified"],
-            "filename": item["filename"],
-            **existing_extra,
-        }
-        if "poster_filename" in item:
-            metadata["items"][rel_path]["poster_filename"] = item["poster_filename"]
-        if "optimized_filename" in item:
-            metadata["items"][rel_path]["optimized_filename"] = item["optimized_filename"]
+        items: dict[str, Any] = {}
+        for item in scanned_items:
+            rel_path = item["relative_path"]
+            # The entry this file's tags and extra fields come from: its own,
+            # or the one it moved from.
+            previous = existing.get(rel_path) or existing.get(moved.get(rel_path, ""))
+            if previous is not None:
+                tags = previous.get("tags", [])
+            else:
+                # New item — derive tags from subfolder path components.
+                # e.g. "cyberpunk/session1/image.jpg" → tags: ["cyberpunk", "session1"]
+                # Root-level files get no auto-tags.
+                tags = sorted(rel_path.split("/")[:-1])
 
-    # Remove entries for files that no longer exist
-    removed_paths = existing_paths - scanned_paths
-    for path in removed_paths:
-        del metadata["items"][path]
+            # Keep any extra fields (e.g. prompt, created_with) that were
+            # added by external tools.
+            extra = {k: v for k, v in (previous or {}).items() if k not in SCAN_FIELDS}
+            entry = {
+                "tags": tags,
+                "type": item["type"],
+                "size": item["size"],
+                "modified": item["modified"],
+                "filename": item["filename"],
+                **extra,
+            }
+            for key in ("poster_filename", "optimized_filename"):
+                if key in item:
+                    entry[key] = item[key]
+            items[rel_path] = entry
 
-    # Update scan timestamp and save
-    metadata["last_scan"] = datetime.now().isoformat()
-    save_metadata(media_dir, metadata)
+        metadata["items"] = items
+        metadata["last_scan"] = datetime.now().isoformat()
+        save_metadata(media_dir, metadata)
 
-    new_items = scanned_paths - existing_paths
+    for new_path, old_path in moved.items():
+        logger.info(f"Moved: {old_path} -> {new_path} (tags kept)")
     logger.info(
         f"Scan complete: {len(scanned_items)} total, "
-        f"{len(new_items)} new, {len(removed_paths)} removed"
+        f"{len(new_paths) - len(moved)} new, {len(removed_paths) - len(moved)} removed, "
+        f"{len(moved)} moved"
     )
 
     return {
         "total_items": len(scanned_items),
-        "new_items": len(new_items),
-        "removed_items": len(removed_paths),
+        "new_items": len(new_paths) - len(moved),
+        "removed_items": len(removed_paths) - len(moved),
+        "moved_items": len(moved),
+    }
+
+
+# Fields a scan writes itself. Anything else on an entry was added by
+# another tool and is carried along untouched.
+SCAN_FIELDS = {"tags", "type", "size", "modified", "filename",
+               "poster_filename", "optimized_filename"}
+
+
+def _match_moved_files(
+    existing: dict[str, Any],
+    removed_paths: set[str],
+    scanned_items: list[dict[str, Any]],
+    new_paths: set[str],
+) -> dict[str, str]:
+    """Pair files that vanished from one path and appeared at another.
+
+    A pair is made only when the filename and size identify exactly one
+    vanished file and exactly one new file. Anything ambiguous is left
+    alone, so tags are never carried to the wrong clip.
+
+    Returns:
+        {new_path: old_path} for each confident match.
+    """
+    def key(filename: str, size: Any) -> tuple[str, Any]:
+        return (filename.lower(), size)
+
+    gone: dict[tuple[str, Any], list[str]] = {}
+    for path in removed_paths:
+        entry = existing[path]
+        k = key(entry.get("filename", os.path.basename(path)), entry.get("size"))
+        gone.setdefault(k, []).append(path)
+
+    arrived: dict[tuple[str, Any], list[str]] = {}
+    for item in scanned_items:
+        if item["relative_path"] in new_paths:
+            arrived.setdefault(key(item["filename"], item["size"]), []).append(
+                item["relative_path"])
+
+    return {
+        new[0]: old[0]
+        for k, new in arrived.items()
+        if len(new) == 1 and len(old := gone.get(k, [])) == 1
     }
 
 
@@ -527,9 +617,19 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         """Return the current media directory (mutable via /api/set-media-dir)."""
         return app.config["MEDIA_DIR"]
 
-    # Run initial scan on startup
+    # Run initial scan on startup. An unreadable metadata file doesn't stop
+    # the server; every request that needs it reports the error instead.
     logger.info("Running initial media scan...")
-    perform_scan(_media_dir())
+    try:
+        perform_scan(_media_dir())
+    except MetadataError as e:
+        logger.error(f"{e}. Tags are NOT being saved until this file is fixed or moved away.")
+
+    @app.errorhandler(MetadataError)
+    def handle_metadata_error(e: MetadataError):
+        """Report metadata read/write failures to the page instead of hiding them."""
+        logger.error(str(e))
+        return jsonify({"error": str(e)}), 500
 
     # -----------------------------------------------------------------------
     # Routes — Pages
@@ -602,8 +702,9 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             JSON with keys: items (list), page, per_page, total_items,
             total_pages, has_more.
         """
-        metadata = load_metadata(_media_dir())
-        items_dict = metadata.get("items", {})
+        with _metadata_lock:
+            metadata = load_metadata(_media_dir())
+        items_dict = metadata["items"]
 
         # Build list of items with their relative paths as IDs
         items = []
@@ -688,6 +789,7 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             config.getint("pagination", "batch_size"),
             type=int,
         )
+        per_page = min(max(1, per_page), 500)
         total_items = len(items)
         total_pages = max(1, (total_items + per_page - 1) // per_page)
         start = (page - 1) * per_page
@@ -720,7 +822,8 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         Returns:
             JSON with key 'tags': list of {name, count} dicts, sorted by name.
         """
-        metadata = load_metadata(_media_dir())
+        with _metadata_lock:
+            metadata = load_metadata(_media_dir())
         tag_counts: dict[str, int] = {}
         untagged_count = 0
         for data in metadata["items"].values():
@@ -762,16 +865,16 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         if not item_ids or not new_tags:
             return jsonify({"error": "item_ids and tags required"}), 400
 
-        metadata = load_metadata(_media_dir())
-        updated = 0
-        for item_id in item_ids:
-            if item_id in metadata["items"]:
-                existing = set(metadata["items"][item_id].get("tags", []))
-                existing.update(new_tags)
-                metadata["items"][item_id]["tags"] = sorted(existing)
-                updated += 1
-
-        save_metadata(_media_dir(), metadata)
+        with _metadata_lock:
+            metadata = load_metadata(_media_dir())
+            updated = 0
+            for item_id in item_ids:
+                if item_id in metadata["items"]:
+                    existing = set(metadata["items"][item_id].get("tags", []))
+                    existing.update(new_tags)
+                    metadata["items"][item_id]["tags"] = sorted(existing)
+                    updated += 1
+            save_metadata(_media_dir(), metadata)
         return jsonify({"updated": updated})
 
     @app.route("/api/tags", methods=["DELETE"])
@@ -794,17 +897,17 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         if not item_ids or not remove_tags:
             return jsonify({"error": "item_ids and tags required"}), 400
 
-        metadata = load_metadata(_media_dir())
-        updated = 0
-        for item_id in item_ids:
-            if item_id in metadata["items"]:
-                existing = set(metadata["items"][item_id].get("tags", []))
-                metadata["items"][item_id]["tags"] = sorted(
-                    existing - remove_tags
-                )
-                updated += 1
-
-        save_metadata(_media_dir(), metadata)
+        with _metadata_lock:
+            metadata = load_metadata(_media_dir())
+            updated = 0
+            for item_id in item_ids:
+                if item_id in metadata["items"]:
+                    existing = set(metadata["items"][item_id].get("tags", []))
+                    metadata["items"][item_id]["tags"] = sorted(
+                        existing - remove_tags
+                    )
+                    updated += 1
+            save_metadata(_media_dir(), metadata)
         return jsonify({"updated": updated})
 
     @app.route("/api/tags/<tag_name>", methods=["DELETE"])
@@ -820,17 +923,16 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         Returns:
             JSON with 'tag' (name removed) and 'updated' (count of items affected).
         """
-        metadata = load_metadata(_media_dir())
-        updated = 0
-
-        for item_data in metadata["items"].values():
-            tags = item_data.get("tags", [])
-            if tag_name in tags:
-                tags.remove(tag_name)
-                item_data["tags"] = sorted(tags)
-                updated += 1
-
-        save_metadata(_media_dir(), metadata)
+        with _metadata_lock:
+            metadata = load_metadata(_media_dir())
+            updated = 0
+            for item_data in metadata["items"].values():
+                tags = item_data.get("tags", [])
+                if tag_name in tags:
+                    tags.remove(tag_name)
+                    item_data["tags"] = sorted(tags)
+                    updated += 1
+            save_metadata(_media_dir(), metadata)
         logger.info(f"Global tag removal: '{tag_name}' removed from {updated} items")
         return jsonify({"tag": tag_name, "updated": updated})
 
@@ -852,43 +954,45 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         if not item_ids:
             return jsonify({"error": "item_ids required"}), 400
 
-        trash_dir = os.path.join(_media_dir(), ".trash")
+        media_dir = _media_dir()
+        trash_dir = os.path.join(media_dir, ".trash")
         os.makedirs(trash_dir, exist_ok=True)
 
-        metadata = load_metadata(_media_dir())
         deleted = 0
         errors = []
+        with _metadata_lock:
+            metadata = load_metadata(media_dir)
+            for item_id in item_ids:
+                # Only files the library knows about can be deleted. IDs come
+                # from the scan, so this also rules out paths like "../x".
+                if item_id not in metadata["items"]:
+                    errors.append(f"Not in library: {item_id}")
+                    continue
+                src_path = os.path.join(media_dir, item_id)
+                if not os.path.exists(src_path):
+                    errors.append(f"File not found: {item_id}")
+                    continue
 
-        for item_id in item_ids:
-            src_path = os.path.join(_media_dir(), item_id)
-            if not os.path.exists(src_path):
-                errors.append(f"File not found: {item_id}")
-                continue
+                try:
+                    # Move to .trash/, preserving filename (add hash if collision)
+                    dest_filename = os.path.basename(item_id)
+                    dest_path = os.path.join(trash_dir, dest_filename)
+                    if os.path.exists(dest_path):
+                        stem = Path(dest_filename).stem
+                        ext = Path(dest_filename).suffix
+                        path_hash = hashlib.md5(item_id.encode()).hexdigest()[:8]
+                        dest_path = os.path.join(trash_dir, f"{stem}_{path_hash}{ext}")
 
-            try:
-                # Move to .trash/, preserving filename (add hash if collision)
-                dest_filename = os.path.basename(item_id)
-                dest_path = os.path.join(trash_dir, dest_filename)
-                if os.path.exists(dest_path):
-                    stem = Path(dest_filename).stem
-                    ext = Path(dest_filename).suffix
-                    path_hash = hashlib.md5(item_id.encode()).hexdigest()[:8]
-                    dest_path = os.path.join(trash_dir, f"{stem}_{path_hash}{ext}")
-
-                shutil.move(src_path, dest_path)
-
-                # Remove from metadata
-                if item_id in metadata["items"]:
+                    shutil.move(src_path, dest_path)
                     del metadata["items"][item_id]
+                    deleted += 1
+                    logger.info(f"Trashed: {item_id}")
 
-                deleted += 1
-                logger.info(f"Trashed: {item_id}")
+                except Exception as e:
+                    errors.append(f"Failed to delete {item_id}: {e}")
+                    logger.error(f"Delete failed for {item_id}: {e}")
 
-            except Exception as e:
-                errors.append(f"Failed to delete {item_id}: {e}")
-                logger.error(f"Delete failed for {item_id}: {e}")
-
-        save_metadata(_media_dir(), metadata)
+            save_metadata(media_dir, metadata)
         return jsonify({"deleted": deleted, "errors": errors})
 
     # -----------------------------------------------------------------------
