@@ -457,17 +457,20 @@ const Controls = {
         const bar = document.getElementById("filter-indicator");
         const parts = [];
 
+        const esc = (s) => Tags._escapeHtml(s);
+        const label = (t) => esc(t === this.untaggedSentinel ? "(untagged)" : t);
+
         if (Wall.params.filter_type !== "all") {
             parts.push(`Type: ${Wall.params.filter_type}s`);
         }
         if (this.activeFilterTags.size > 0) {
-            parts.push(`Include: ${Array.from(this.activeFilterTags).join(", ")}`);
+            parts.push(`Include: ${Array.from(this.activeFilterTags).map(label).join(", ")}`);
         }
         if (this.excludeFilterTags.size > 0) {
-            parts.push(`Exclude: ${Array.from(this.excludeFilterTags).join(", ")}`);
+            parts.push(`Exclude: ${Array.from(this.excludeFilterTags).map(label).join(", ")}`);
         }
         if (Wall.params.search) {
-            parts.push(`Search: "${Wall.params.search}"`);
+            parts.push(`Search: "${esc(Wall.params.search)}"`);
         }
 
         const grid = document.getElementById("media-grid");

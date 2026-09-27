@@ -522,12 +522,14 @@ const Tags = {
             body: JSON.stringify({ item_ids: itemIds, tags: tags }),
         });
         if (response.ok) {
-            // Update local state
+            // Update local state with the names the server saved
+            // (it normalizes them: "Red Dress" -> "red-dress")
+            const saved = (await response.json()).tags || [];
             itemIds.forEach(id => {
                 const item = Wall.items.find(i => i.id === id);
                 if (item) {
                     const existing = new Set(item.tags || []);
-                    tags.forEach(t => existing.add(t));
+                    saved.forEach(t => existing.add(t));
                     item.tags = Array.from(existing).sort();
                 }
             });
@@ -541,7 +543,7 @@ const Tags = {
             body: JSON.stringify({ item_ids: itemIds, tags: tags }),
         });
         if (response.ok) {
-            const removeSet = new Set(tags);
+            const removeSet = new Set((await response.json()).tags || []);
             itemIds.forEach(id => {
                 const item = Wall.items.find(i => i.id === id);
                 if (item) {

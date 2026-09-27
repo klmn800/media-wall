@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -199,6 +200,59 @@ OPTIMIZED_QUALITY = 85
 # Surfaced to the frontend as a pinned (untagged) filter chip so flat folders
 # without any tags can still be included/excluded from the grid.
 UNTAGGED_SENTINEL = "__untagged__"
+
+# Characters a tag can't contain: "," separates tags in filter params and
+# the bulk-tag box, "/" and "\" break the /api/tags/<name> route.
+TAG_FORBIDDEN_CHARS = ",/\\"
+TAG_MAX_LENGTH = 64
+
+
+def normalize_tag(raw: Any) -> str:
+    """Return the one canonical form of a tag name.
+
+    Trims, lowercases, and turns runs of spaces/hyphens into a single
+    hyphen, so "  Red  Dress " and "red dress" both become "red-dress".
+
+    Raises:
+        ValueError: The tag is empty, too long, reserved, or contains a
+            forbidden character. The message is shown to the user.
+    """
+    if not isinstance(raw, str):
+        raise ValueError("Tags must be text")
+    tag = re.sub(r"[\s-]+", "-", raw.strip().lower()).strip("-")
+    if not tag:
+        raise ValueError("Tag is empty")
+    bad = [c for c in TAG_FORBIDDEN_CHARS if c in tag]
+    if bad:
+        raise ValueError(f'Tag "{raw.strip()}" can\'t contain {" or ".join(bad)}')
+    if tag == UNTAGGED_SENTINEL:
+        raise ValueError(f'"{UNTAGGED_SENTINEL}" is reserved')
+    if len(tag) > TAG_MAX_LENGTH:
+        raise ValueError(f"Tag is longer than {TAG_MAX_LENGTH} characters")
+    return tag
+
+
+def clean_stored_tags(tags: Any) -> list[str]:
+    """Normalize a stored tag list, converting instead of rejecting.
+
+    Used for tags already on disk (older versions saved them as typed) and
+    for folder-name tags. Forbidden characters become hyphens so no tagging
+    work is lost; anything still invalid is dropped. Returns a sorted,
+    de-duplicated list.
+    """
+    if not isinstance(tags, list):
+        return []
+    out = set()
+    for raw in tags:
+        if not isinstance(raw, str):
+            continue
+        for c in TAG_FORBIDDEN_CHARS:
+            raw = raw.replace(c, "-")
+        try:
+            out.add(normalize_tag(raw))
+        except ValueError:
+            pass
+    return sorted(out)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +455,11 @@ def load_metadata(media_dir: str) -> dict[str, Any]:
         raise MetadataError(f"Could not read {meta_path}: {e}") from e
     if not isinstance(metadata, dict) or not isinstance(metadata.get("items"), dict):
         raise MetadataError(f"{meta_path} is not a Media Wall metadata file")
+    # Older versions stored tags exactly as typed; bring them to the
+    # canonical form (saved back on the next write).
+    for entry in metadata["items"].values():
+        if isinstance(entry, dict):
+            entry["tags"] = clean_stored_tags(entry.get("tags", []))
     return metadata
 
 
@@ -505,7 +564,7 @@ def perform_scan(media_dir: str) -> dict[str, Any]:
                 # New item — derive tags from subfolder path components.
                 # e.g. "cyberpunk/session1/image.jpg" → tags: ["cyberpunk", "session1"]
                 # Root-level files get no auto-tags.
-                tags = sorted(rel_path.split("/")[:-1])
+                tags = clean_stored_tags(rel_path.split("/")[:-1])
 
             # Keep any extra fields (e.g. prompt, created_with) that were
             # added by external tools.
@@ -845,6 +904,28 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             })
         return jsonify({"tags": tags, "untagged_sentinel": UNTAGGED_SENTINEL})
 
+    def _parse_tag_request():
+        """Read and validate {item_ids, tags} from a tag request body.
+
+        Returns:
+            (item_ids, normalized_tags, None) on success, or
+            (None, None, error_response) if the body or any tag is invalid.
+            One bad tag rejects the whole request, so nothing is half-applied.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return None, None, (jsonify({"error": "Request body required"}), 400)
+        item_ids = body.get("item_ids")
+        raw_tags = body.get("tags")
+        if not isinstance(item_ids, list) or not item_ids \
+                or not isinstance(raw_tags, list) or not raw_tags:
+            return None, None, (jsonify({"error": "item_ids and tags required"}), 400)
+        try:
+            tags = sorted({normalize_tag(t) for t in raw_tags})
+        except ValueError as e:
+            return None, None, (jsonify({"error": str(e)}), 400)
+        return item_ids, tags, None
+
     @app.route("/api/tags", methods=["POST"])
     def api_tags_add():
         """Add tags to one or more media items.
@@ -854,16 +935,12 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             tags (list[str]): Tag names to add.
 
         Returns:
-            JSON with 'updated' count.
+            JSON with 'updated' count and 'tags' (the normalized names that
+            were applied), or 400 with 'error' if any tag name is invalid.
         """
-        body = request.get_json()
-        if not body:
-            return jsonify({"error": "Request body required"}), 400
-
-        item_ids = body.get("item_ids", [])
-        new_tags = body.get("tags", [])
-        if not item_ids or not new_tags:
-            return jsonify({"error": "item_ids and tags required"}), 400
+        item_ids, new_tags, error = _parse_tag_request()
+        if error:
+            return error
 
         with _metadata_lock:
             metadata = load_metadata(_media_dir())
@@ -875,7 +952,7 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                     metadata["items"][item_id]["tags"] = sorted(existing)
                     updated += 1
             save_metadata(_media_dir(), metadata)
-        return jsonify({"updated": updated})
+        return jsonify({"updated": updated, "tags": new_tags})
 
     @app.route("/api/tags", methods=["DELETE"])
     def api_tags_remove():
@@ -886,16 +963,13 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
             tags (list[str]): Tag names to remove.
 
         Returns:
-            JSON with 'updated' count.
+            JSON with 'updated' count and 'tags' (the normalized names that
+            were removed), or 400 with 'error' if any tag name is invalid.
         """
-        body = request.get_json()
-        if not body:
-            return jsonify({"error": "Request body required"}), 400
-
-        item_ids = body.get("item_ids", [])
-        remove_tags = set(body.get("tags", []))
-        if not item_ids or not remove_tags:
-            return jsonify({"error": "item_ids and tags required"}), 400
+        item_ids, tags, error = _parse_tag_request()
+        if error:
+            return error
+        remove_tags = set(tags)
 
         with _metadata_lock:
             metadata = load_metadata(_media_dir())
@@ -908,7 +982,7 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
                     )
                     updated += 1
             save_metadata(_media_dir(), metadata)
-        return jsonify({"updated": updated})
+        return jsonify({"updated": updated, "tags": tags})
 
     @app.route("/api/tags/<tag_name>", methods=["DELETE"])
     def api_tag_delete_global(tag_name: str):
@@ -923,6 +997,11 @@ def create_app(config: configparser.ConfigParser, config_path: str = "") -> Flas
         Returns:
             JSON with 'tag' (name removed) and 'updated' (count of items affected).
         """
+        try:
+            tag_name = normalize_tag(tag_name)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
         with _metadata_lock:
             metadata = load_metadata(_media_dir())
             updated = 0
