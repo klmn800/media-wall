@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   a tagging review written from a Beat Wall session (2026-09-25). Item 1 (the tag wipe) was
   fixed in the 2026-09-26 bug-fix run. The tagging-friction items in section 2 are still open,
   and Beat Wall's clip budgeting depends on tags, so they come next.
+  Correction (2026-09-28): the review says "two overlapping writes are enough"; only 1, 4
+  and 8 at once were measured, never 2.
 
 ## Hard rules
 
